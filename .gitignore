@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Terraform
+# Note: .terraform.lock.hcl is intentionally NOT ignored (HashiCorp guidance —
+# commit it so provider versions stay reproducible across machines).
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log
+.terraformrc
+terraform.rc
+
+# Project secrets / certs (per _interfaces.md §2.4 — IoT x.509 certs)
+simulator/.secrets/
+**/.env
+*.pem
+*.key
+*.crt
+
+# Local data (Docker volumes — InfluxDB, Mosquitto persistence when local_runtime lands)
+data/
+local_runtime/data/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
