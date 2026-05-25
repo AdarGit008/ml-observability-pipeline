@@ -59,21 +59,25 @@ Each task is a unit of work small enough to finish in one session. Roughly: one 
 
 ## 4. Gemini review loop
 
-Gemini participates via the `gemini` CLI. Setup is PO's responsibility (one-time):
+Gemini participates via the Gemini REST API, called from `scripts/gemini_review.ps1` (Windows) or `scripts/gemini_review.sh` (bash). The script replaces the `@google/gemini-cli` package — see ADR 0001 for why.
 
-```bash
-# Install (PO machine)
-npm install -g @google/gemini-cli   # or pip install google-generativeai
-export GEMINI_API_KEY=...            # from ai.google.dev
+**One-time setup (PO machine):**
+```powershell
+# Grab a key at https://aistudio.google.com/apikey, then:
+[Environment]::SetEnvironmentVariable("GEMINI_API_KEY", "<your-key>", "User")
+# Open a new PowerShell window so the env var loads.
 ```
 
 **Per-review flow:**
 
-1. Claude writes `review_packets/YYYY-MM-DD-<topic>.md` using `templates/review_packet_template.md`.
-2. PO runs:
-   ```bash
-   gemini -p "$(cat review_packets/2026-05-24-simulator.md)" > review_responses/2026-05-24-simulator.md
+1. Claude writes `review_packets/YYYY-MM-DD-<slug>.md` using `templates/review_packet_template.md`.
+2. PO runs (from the repo root):
+   ```powershell
+   .\scripts\gemini_review.ps1 -Slug <slug>
+   # if Pro is over capacity (503):
+   .\scripts\gemini_review.ps1 -Slug <slug> -Model gemini-2.5-flash
    ```
+   …which writes `review_responses/YYYY-MM-DD-<slug>.md`.
 3. Claude reads the response, addresses each point in the packet's "Resolution" section, commits.
 
 **What goes in a review packet** (see template):
