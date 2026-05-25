@@ -1,5 +1,16 @@
 # model
 
+> **Carry-in from ADR 0002 (added 2026-05-25 by the simulator config-yaml session):**
+> `bearing_temp` is **not monotonic** in `degradation`. The ADR-0002 RPM coupling
+> (`rpm = setpoint * (1 - degradation) + N(0, 5 + 15 * d)`) means RPM drops
+> faster than the direct `degradation * 15` term rises, so bearing temp peaks
+> somewhere in DEGRADING territory and falls again through FAILING and FAILED.
+> Feature engineering for this model must not pre-suppose monotonicity in
+> bearing temp. Recommended: use a rolling-window std of bearing_temp as the
+> wear-trend feature (clean monotonic signal), and keep vibration_amp as the
+> primary raw "wear" signal — it remains linear in degradation. See
+> `docs/adr/0002-rpm-coupled-to-degradation.md` for the full justification.
+
 ## Purpose
 Predicts P(pump fails within 48h) from 4 raw signals + 4 rolling features. Trained on synthetic data from the simulator in fast-forward.
 
