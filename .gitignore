@@ -36,6 +36,16 @@ simulator/.secrets/
 data/
 local_runtime/data/
 
+# Dev quality-of-life (per Gemini review of 2026-05-24-simulator-pump)
+.envrc          # direnv
+.python-version # pyenv
+
+# Local backups (e.g. .docx editing fallbacks)
+*.bak-*
+
+# Gemini review debug dumps (from `gemini_review.ps1 -DumpBody`)
+review_responses/*.request.json
+
 # IDE / OS
 .vscode/
 .idea/
