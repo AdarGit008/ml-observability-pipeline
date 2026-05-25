@@ -6,13 +6,17 @@
 #   - unknown keys raise (catches typos like `pump_cont: 15`)
 #   - types are checked strictly (booleans are NOT integers, integers are
 #     NOT floats, etc.)
+#   - broker.tls is required iff broker.target is 'aws-iot' and forbidden iff
+#     broker.target is 'local' (see the broker section below)
 #
 # Run `python -c "from simulator.config import load_config; print(load_config('simulator/config.yaml'))"`
-# to sanity-check after edits.
+# to sanity-check after edits, or `python -m simulator --config simulator/config.yaml`
+# to start the fleet (per the mqtt-publishing session 2026-05-25).
 
 fleet:
   # Number of pumps in the simulated fleet. PLAN.md targets ~15.
-  # Range [1, 50]. Above 50 starts to stress single-PC local mode.
+  # Range [1, 100]. Above ~30 starts to stress single-PC local mode; the
+  # cap exists to catch typos (pump_count: 1500), not to enforce physics.
   pump_count: 15
 
   # Nominal RPM each pump targets when HEALTHY. Real-world centrifugal
@@ -32,22 +36,39 @@ fleet:
 
 # Which demo scenario to drive the fleet with.
 #
-# Only `healthy` is wired this session (config-yaml). The other three are
-# accepted at load time so demo manifests can be authored ahead of the
-# scenario runner, but trying to actually *run* them today is a no-op
-# (only HEALTHY-state behavior is implemented).
+# Only `healthy` is wired today (mqtt-publishing session 2026-05-25). The
+# other three are accepted at load time so demo manifests can be authored
+# ahead of the scenario runner; trying to actually *run* them raises
+# `NotImplementedError` at Fleet construction with a message pointing here.
 #
 # Allowed: healthy | seasonal_drift | fleet_expansion | real_failure
 scenario: healthy
 
 broker:
-  # Where telemetry will be published (no client is wired this session).
+  # Where telemetry is published. Same Pump/Fleet code path either way
+  # (per ADR 0003); the difference is which Publisher subclass instantiates
+  # and whether the `tls:` block below is required.
   # Allowed: local | aws-iot
   target: local
-  # URL is validated as a non-empty string but not parsed — the (future)
-  # MQTT client owns format validation. Mosquitto default for `local`;
-  # `aws-iot` will need the IoT Core endpoint here.
+
+  # URL is validated as a non-empty string but not parsed — the MQTT client
+  # owns format validation (aiomqtt parses scheme/host/port). For `local`
+  # this is the Mosquitto endpoint; for `aws-iot` this is the IoT Core
+  # ATS endpoint (e.g. "<account>-ats.iot.eu-central-1.amazonaws.com").
   url: "mqtt://localhost:1883"
+
+  # mTLS material — REQUIRED when target is 'aws-iot', FORBIDDEN when
+  # target is 'local'. The loader checks the paths are non-empty strings
+  # but does NOT touch disk; AwsIotPublisher does file-existence and cert
+  # parsing at connect time (when it lands — see ADR 0003 for status).
+  #
+  # Example shape for an aws-iot manifest (uncomment after switching
+  # target above and provisioning certs via the AWS IoT console):
+  #
+  # tls:
+  #   cert_path: "certs/pump-fleet.cert.pem"
+  #   key_path:  "certs/pump-fleet.private.key"
+  #   ca_path:   "certs/AmazonRootCA1.pem"
 
 # Compress HEALTHY dwell so a fresh clone exercises the full
 # HEALTHY -> DEGRADING -> FAILING -> FAILED arc in a few minutes. Without

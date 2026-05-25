@@ -32,6 +32,11 @@ simulator/.secrets/
 *.key
 *.crt
 
+# User-local simulator config (per PO decision 2026-05-25 on Gemini add'l obs A —
+# strict loader, no auto-defaults; users copy config.example.yaml -> config.yaml
+# and tune locally; UX work deferred to a later onboarding session).
+simulator/config.yaml
+
 # Local data (Docker volumes — InfluxDB, Mosquitto persistence when local_runtime lands)
 data/
 local_runtime/data/

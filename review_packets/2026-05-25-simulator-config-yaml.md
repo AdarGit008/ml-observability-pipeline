@@ -1,8 +1,8 @@
 # Review Packet 2026-05-25 — simulator — config-yaml
 
 > Run from the repo root with:
-> `.\scripts\gemini_review.ps1 -Slug 2026-05-25-simulator-config-yaml`
-> (or `./scripts/gemini_review.sh 2026-05-25-simulator-config-yaml` on bash).
+> `.\scripts\gemini_review.ps1 -Slug simulator-config-yaml`
+> (or `./scripts/gemini_review.sh simulator-config-yaml` on bash).
 > See ADR 0001 for why we don't use the Gemini CLI.
 
 ## Role for Gemini
@@ -67,10 +67,12 @@ Modified:
 
 | Gemini point | Disposition | Notes |
 |---|---|---|
-| 1. (validation severity) | <Addressed / Deferred / Rejected> | <where, why> |
-| 2. (demo_mode dwell constant) | | |
-| 3. (range bounds) | | |
-| 4. (ConfigError parent) | | |
-| 5. (profiles_for sharing) | | |
-| 6. (requirements.txt shape) | | |
-| 7. (AWS-specific leakage) | | |
+| 1. Validation severity for non-wired scenarios | **Addressed** | Added `warnings.warn(UserWarning, ...)` in `load_config` when `scenario != HEALTHY`. Schema still parses; user sees an explicit "parsed but not implemented" message. New test `test_non_healthy_scenarios_parse_with_warning` asserts the warning fires for all three non-healthy values; new test `test_healthy_scenario_emits_no_warning` guards against the warning firing on the wired path. |
+| 2. `DEMO_MODE_HEALTHY_DWELL_TICKS` constant vs YAML override | **Confirmed (no change)** | Gemini agreed with the original instinct: minimalism is polish, the only sensible value for portfolio demos is ~60 ticks, advanced use cases can edit the module constant. Recorded for the trade-offs section of the session log. |
+| 3. Range bounds | **Addressed** | Raised `_PUMP_COUNT_MAX` 50 → 100 per Gemini's "single-PC asyncio still tolerable at ~100" suggestion. Inline comment cites this review. `setpoint_rpm` / `ambient_celsius` bounds left as-is (Gemini didn't flag them specifically). `test_pump_count_out_of_range` parametrization updated 51 → 101. Error message format ("must be in [min, max], got X") was already explicit enough — no change there. |
+| 4. `ConfigError(ValueError)` vs `Exception` | **Addressed** | Changed `class ConfigError(ValueError)` → `class ConfigError(Exception)`. Docstring updated to cite the review and explain why subclassing `ValueError` is risky (accidental swallowing of stdlib `ValueError`s from `yaml.safe_load`). No callers were depending on the `ValueError` parent (only `pytest.raises(ConfigError, ...)` usage in tests). |
+| 5. `profiles_for` shared `StateProfile` references | **Confirmed (no change)** | Gemini agreed: relying on `@dataclass(frozen=True)` is idiomatic; deep-copy would be defensive programming against deliberate type-definition sabotage. Existing test `test_profiles_for_returns_independent_dict` covers the dict-level isolation, which is the contract that matters. |
+| 6. `requirements.txt` shape | **Confirmed (no change)** | Gemini agreed: single `requirements.txt` is what recruiters expect; `pyproject.toml` would imply a build backend we're not setting up. Plan to add `requirements-dev.txt` when pytest/ruff are formalized. Existing comment in `requirements.txt` already mentions this split. |
+| 7. AWS-specific leakage | **Confirmed (no change)** | Gemini agreed: current schema is fine, the `_assert_exact_keys` strict-unknown-keys check (already in place) is what makes the future IoT-session additions (`broker.endpoint`, `broker.cert_path`, etc.) safe to introduce. Carry-forward noted in session log's "Note for next session". |
+| Add'l obs A: `load_config(path=None)` → defaults | **Rejected (PO decision 2026-05-25)** | PO chose to keep the strict loader and address the broader load/install/run UX in a later session. Gemini's suggestion would have introduced a second source of truth for defaults (`config.example.yaml` and a `default_config()` helper) and blurred the loader contract; the README setup step (`cp simulator/config.example.yaml simulator/config.yaml`) is the deferred fix. `simulator/config.yaml` added to `.gitignore` so user-local tuning doesn't leak. |
+| Add'l obs B: YAML safe-load attack test | **Addressed** | Added `test_yaml_safe_load_rejects_python_tag_attack` — confirms the classic `!!python/object/apply:os.system [...]` vector surfaces as a `ConfigError` (via the existing `yaml.YAMLError` handler), proving the safety property to a reviewer and guarding against an accidental `safe_load` → `load` swap in a future edit. |

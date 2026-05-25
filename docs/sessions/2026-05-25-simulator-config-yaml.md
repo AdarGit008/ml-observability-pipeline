@@ -51,16 +51,26 @@ Worked around in-session by writing via `cat > file <<'EOF' ... EOF` from bash. 
 
 ## Gemini review highlights
 
-To be filled after `gemini_review.ps1` runs. Packet has 7 specific questions (validation severity, demo_mode shape, range bounds, ConfigError parent class, profiles_for sharing, requirements.txt shape, AWS-specific schema leakage). Resolution table in the packet awaits.
+Gemini engaged substantively on all 7 questions and added 2 design observations (no rubber-stamp). Full dispositions in the packet's Resolution table; summary:
+
+- **Q1 (validation severity) — Addressed.** Gemini argued silent-accept is a UX footgun for the portfolio audience: a recruiter who tries `scenario: seasonal_drift`, sees no drift, and assumes the project is broken. Added `warnings.warn(UserWarning)` in `load_config` for non-HEALTHY scenarios, plus two new tests (`test_non_healthy_scenarios_parse_with_warning`, `test_healthy_scenario_emits_no_warning`).
+- **Q3 (range bounds) — Addressed.** Bumped `_PUMP_COUNT_MAX` 50 → 100 on Gemini's call that single-PC asyncio can tolerate ~100 pumps. `test_pump_count_out_of_range` parametrization updated 51 → 101. Error message form ("must be in [min, max], got X") was already explicit; no change there.
+- **Q4 (`ConfigError` parent) — Addressed.** Changed `ConfigError(ValueError)` → `ConfigError(Exception)` after Gemini pointed out that a caller's `except ValueError` could accidentally swallow unrelated value errors from inside `yaml.safe_load` or type-conversion utilities. No callers were depending on the `ValueError` parent.
+- **Q2, Q5, Q6, Q7 — Confirmed (no code change).** Gemini agreed with the original instinct on all four: minimalism for `demo_mode` (Q2), no deep-copy in `profiles_for` (Q5), single `requirements.txt` for now (Q6), strict-unknown-keys is what guards future schema additions (Q7).
+- **Additional observation A (no-config-file defaults) — Rejected (PO 2026-05-25).** Gemini suggested `load_config(path=None)` could return a `SimulatorConfig` with sensible defaults so `python -m simulator.pump` works without copying the example. PO chose to keep the strict loader and address the broader load/install/run UX in a later session. Concrete step taken this session: `simulator/config.yaml` added to `.gitignore` so user-local tuning won't leak; the README setup step is deferred.
+- **Additional observation B (YAML safe-load attack test) — Addressed.** Added `test_yaml_safe_load_rejects_python_tag_attack` to prove `!!python/object/apply:os.system [...]` is rejected via the existing `yaml.YAMLError` handler.
+
+The three accepted changes shipped in commit 4 (below). Tests now total **77 passing** (+2 from the original 75).
 
 ## State at end of session
 
-- **Tests: 75 passing** (30 pre-existing pump tests + 45 new config tests), 0.18 s in sandbox (`cp simulator /tmp && pytest`).
+- **Tests: 77 passing** (30 pre-existing pump tests + 47 config tests — original 45 plus the 2 added from Gemini's review), 0.19 s in sandbox (`cp simulator /tmp && pytest`).
 - **Python:** sandbox runs 3.10.12, project target is 3.12. New code uses `from __future__ import annotations`; nothing 3.12-only used. Adar to re-run Windows-side on 3.12 before merge.
 - **Open follow-ups:**
-  - File-tool / FUSE write-truncation bug — update `[[ml-obs-pipeline-git-on-windows]]` memory before the next session opens.
+  - File-tool / FUSE write-truncation bug — memory `[[ml-obs-pipeline-git-on-windows]]` updated mid-session; carry the bash-heredoc workaround forward.
+  - **Onboarding UX (deferred to a later session, PO 2026-05-25):** The "fresh-clone to first-run" path needs work — at minimum a README setup step (`cp simulator/config.example.yaml simulator/config.yaml`), maybe a `python -m simulator` entry point. PO explicitly chose to keep `load_config` strict (no auto-defaults) and tackle load/install/run UX as its own session. `simulator/config.yaml` is now in `.gitignore` so user-local edits don't leak.
   - MQTT publishing (paho-mqtt, asyncio) — next natural simulator session.
-  - Scenario runner (seasonal_drift, fleet_expansion, real_failure) — currently a no-op; should also clearly fail with NotImplementedError once a runtime entrypoint exists.
+  - Scenario runner (seasonal_drift, fleet_expansion, real_failure) — currently emits a warning but produces HEALTHY behavior; when the runner lands, replace the warning with a `NotImplementedError` for unwired scenarios.
 - **`context/simulator.md`:** updated. `config.yaml` checkbox ticked, interfaces section expanded, this session log linked.
 - **`context/model.md`:** updated with the ADR-0002 carry-in note (cross-component touch, called out in the brief).
 
@@ -109,25 +119,63 @@ feature engineering. Cross-component touch was called out in the session
 brief; the note is inert until the model session opens."
 ```
 
-**Commit 3 — review packet:**
+**Commit 3 — review packet + session log (pre-review snapshot):**
 
 ```powershell
 git add review_packets/2026-05-25-simulator-config-yaml.md docs/sessions/2026-05-25-simulator-config-yaml.md
 git commit -m "review: simulator config-yaml packet + session log"
+```
+
+(Skip the push for now; commit 4 follows immediately.)
+
+Then run Gemini (already done — `review_responses/2026-05-25-simulator-config-yaml.md` is on disk):
+
+```powershell
+.\scripts\gemini_review.ps1 -Slug simulator-config-yaml
+```
+
+**Commit 4 — Gemini-review changes + Resolution + response file:**
+
+```powershell
+git add simulator/config.py simulator/tests/test_config.py .gitignore review_packets/2026-05-25-simulator-config-yaml.md review_responses/2026-05-25-simulator-config-yaml.md docs/sessions/2026-05-25-simulator-config-yaml.md
+
+# Use a PowerShell here-string for the multi-line message so embedded
+# double quotes don't terminate the -m argument early. The closing "@
+# must sit at column 0 with no leading whitespace.
+$msg = @"
+simulator: address Gemini review (warn on non-healthy scenario, raise pump cap, ConfigError parent)
+
+Three accepted changes from review_packets/2026-05-25-simulator-config-yaml.md:
+
+- Q1: load_config now emits warnings.warn(UserWarning) when scenario is
+  non-healthy. Schema still parses; user sees an explicit "parsed but not
+  implemented" message. Two new tests guard the path.
+- Q3: _PUMP_COUNT_MAX 50 -> 100. Single-PC asyncio still tolerable per
+  Gemini; test_pump_count_out_of_range parametrization updated 51 -> 101.
+- Q4: ConfigError now inherits from Exception, not ValueError, to keep
+  callers' except ValueError from accidentally swallowing config errors.
+
+Plus a new test_yaml_safe_load_rejects_python_tag_attack from Gemini's
+additional observation B, proving safe_load rejects the classic RCE
+vector via the existing YAMLError handler.
+
+Add'l obs A (load_config(path=None) auto-defaults) was rejected per PO
+decision: keep the strict loader; the broader fresh-clone-to-first-run
+UX is deferred to a later session. Concrete change here: add
+simulator/config.yaml to .gitignore so user-local tuning doesn't leak.
+
+Tests: 77 passing (30 pump + 47 config). Two of Gemini's points were
+confirmations of the original design (Q2 demo_mode constant, Q5 no
+deep-copy); two more (Q6 requirements.txt shape, Q7 AWS-leakage) were
+no-change-needed. Full disposition table in the review packet.
+"@
+git commit -m $msg
 git push
 ```
 
-Then run Gemini:
-
-```powershell
-.\scripts\gemini_review.ps1 -Slug 2026-05-25-simulator-config-yaml
-```
-
-After the response lands in `review_responses/`, Claude will fill the Resolution table in the packet, commit any code changes from the review, and (if needed) write an ADR.
-
 ## Note for next session
 
-Config-yaml loop will close after Gemini review + Resolution. The natural next simulator session is **MQTT publishing** (paho-mqtt, asyncio). Items to watch:
+Config-yaml loop is closed (Gemini review + Resolution committed in commit 4). The natural next simulator session is **MQTT publishing** (paho-mqtt, asyncio). Items to watch:
 
 1. **`broker.target` is already in the schema** — wire `local` (Mosquitto) and `aws-iot` (mTLS with cert paths) behind a single `Publisher` interface so `Pump.step()` callers don't branch. mTLS cert paths likely need a new sub-block under `broker:` (e.g. `broker.tls.cert_path`, `.key_path`, `.ca_path`); add via additive schema, no breaking changes.
 2. **`scenario`** is still parsed-but-unused. When MQTT lands, also stub a `Scenario` interface and have `load_config` route to it; non-`healthy` scenarios should `raise NotImplementedError` at runner-construction time, not at load time. (This may be revisited by Gemini's answer to question #1 in the current packet.)

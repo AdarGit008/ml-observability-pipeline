@@ -8,14 +8,23 @@ Schema lives here, not in YAML comments, so validation is reproducible and
 unknown-key typos are caught at load time. See ``simulator/config.example.yaml``
 for the canonical example with inline commentary on every field.
 
-What this module does NOT do (deliberately — those live in later sessions):
-- Instantiate ``Pump`` objects or run a fleet.
-- Publish telemetry to MQTT.
-- Decide which scenario actually runs.
+What this module does NOT do (deliberately — those live elsewhere):
+- Instantiate ``Pump`` objects or run a fleet (``simulator/runner.py``).
+- Publish telemetry to MQTT (``simulator/publisher.py``).
+- Reject non-healthy scenarios (the ``Fleet`` constructor raises
+  ``NotImplementedError`` instead — see the design note below).
 
-The ``scenario`` and ``broker`` fields are parsed and validated here purely
-so the YAML schema is stable from day one; only ``demo_mode`` and
-``DEFAULT_PROFILES`` overlay logic is actually wired this session.
+Why the loader is pure schema validation: ``load_config`` deliberately does
+not touch the filesystem beyond reading the YAML it was handed and does not
+emit warnings or errors that depend on runtime feasibility. Catching
+"scenario seasonal_drift is not yet wired" belongs at runner-construction
+time, where the matching code path actually lives; coupling that signal to
+the loader bled across module boundaries and made tests harder (the
+2026-05-25 config-yaml session shipped a ``UserWarning`` here and the
+mqtt-publishing session moved it to the runner). Schema-shape validation
+of the ``broker.tls`` block stays here because it has no runtime
+counterpart — there is no other place to assert "tls is required when
+target is aws-iot" without duplicating it.
 """
 
 from __future__ import annotations
@@ -24,7 +33,7 @@ import os
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import yaml
 
@@ -33,16 +42,17 @@ from simulator.pump import DEFAULT_PROFILES, PumpState, StateProfile
 # How many 2-second ticks HEALTHY collapses to in demo_mode (~2 minutes wall
 # clock). Chosen so the full HEALTHY -> DEGRADING -> FAILING -> FAILED arc
 # completes in under 5 minutes for a fresh local clone — see the TODO in
-# simulator/pump.py::DEFAULT_PROFILES that this session retires.
+# simulator/pump.py::DEFAULT_PROFILES that the config-yaml session retired.
 DEMO_MODE_HEALTHY_DWELL_TICKS: int = 60
 
 
 class ScenarioKind(str, Enum):
-    """Scenarios planned in PLAN.md. Only ``healthy`` is wired this session.
+    """Scenarios planned in PLAN.md. Only ``healthy`` is wired today.
 
     The other three are accepted at load time so demo manifests can be
     authored ahead of the scenario controller; trying to *run* a non-healthy
-    scenario will fail in the (future) scenario-runner module, not here.
+    scenario raises ``NotImplementedError`` in ``simulator.runner.Fleet``,
+    not here.
     """
 
     HEALTHY = "healthy"
@@ -52,8 +62,11 @@ class ScenarioKind(str, Enum):
 
 
 class BrokerTarget(str, Enum):
-    """MQTT broker the simulator publishes to. Same code path either side
-    (per simulator.md), so this is the only switch the runtime needs.
+    """MQTT broker the simulator publishes to.
+
+    The same code path (``Publisher`` ABC + per-pump asyncio task) drives
+    both targets per simulator.md; the difference is which ``Publisher``
+    subclass instantiates and whether mTLS material is required.
     """
 
     LOCAL = "local"
@@ -71,11 +84,31 @@ class FleetConfig:
 
 
 @dataclass(frozen=True)
+class TlsConfig:
+    """mTLS material paths for AWS IoT Core.
+
+    Schema-only at this stage: the loader confirms the paths are non-empty
+    strings but does NOT touch disk. File-existence + cert-content checks
+    live in ``AwsIotPublisher`` (when it lands in a later session). Reason
+    documented in ADR 0003.
+    """
+
+    cert_path: str
+    key_path: str
+    ca_path: str
+
+
+@dataclass(frozen=True)
 class BrokerConfig:
-    """Where telemetry will be published (no client is wired this session)."""
+    """Where telemetry is published.
+
+    ``tls`` is required iff ``target is BrokerTarget.AWS_IOT`` and forbidden
+    iff ``target is BrokerTarget.LOCAL``. Enforced by ``_validate``.
+    """
 
     target: BrokerTarget
     url: str
+    tls: Optional[TlsConfig] = None
 
 
 @dataclass(frozen=True)
@@ -88,22 +121,30 @@ class SimulatorConfig:
     demo_mode: bool
 
 
-class ConfigError(ValueError):
-    """Raised when YAML fails schema validation. Subclass of ValueError so
-    callers can catch ``ValueError`` if they want a coarser net."""
+class ConfigError(Exception):
+    """Raised when YAML fails schema validation.
+
+    Inherits directly from ``Exception`` (not ``ValueError``) per Gemini
+    review Q4 (2026-05-25 config-yaml): subclassing ``ValueError`` would let
+    a caller's ``except ValueError`` accidentally swallow unrelated value
+    errors from deep inside ``yaml.safe_load`` or type-conversion utilities,
+    blurring the contract. Catch ``ConfigError`` explicitly.
+    """
 
 
 # -- Schema constants -----------------------------------------------------
 
 _TOP_LEVEL_KEYS = {"fleet", "scenario", "broker", "demo_mode"}
 _FLEET_KEYS = {"pump_count", "setpoint_rpm", "ambient_celsius", "base_seed"}
-_BROKER_KEYS = {"target", "url"}
+_BROKER_REQUIRED_KEYS = {"target", "url"}
+_BROKER_OPTIONAL_KEYS = {"tls"}
+_TLS_KEYS = {"cert_path", "key_path", "ca_path"}
 
 # Validation ranges. Chosen to catch typos (e.g. pump_count: 1500) while
 # leaving room for non-default but legitimate values. None of these are
 # physical limits — the Pump class enforces no fleet-level cap of its own.
 _PUMP_COUNT_MIN = 1
-_PUMP_COUNT_MAX = 50
+_PUMP_COUNT_MAX = 100  # bumped 50 -> 100 per Gemini review Q3 (2026-05-25 config-yaml)
 _SETPOINT_MIN = 1.0
 _SETPOINT_MAX = 10_000.0
 _AMBIENT_MIN = -50.0
@@ -211,20 +252,7 @@ def _validate(raw: dict[str, Any]) -> SimulatorConfig:
 
     scenario = _enum_from(raw["scenario"], ScenarioKind, "scenario")
 
-    broker_raw = raw["broker"]
-    if not isinstance(broker_raw, dict):
-        raise ConfigError(
-            f"`broker` must be a mapping, got {type(broker_raw).__name__}"
-        )
-    _assert_exact_keys(broker_raw, _BROKER_KEYS, "broker")
-
-    target = _enum_from(broker_raw["target"], BrokerTarget, "broker.target")
-
-    url = broker_raw["url"]
-    if not isinstance(url, str) or not url.strip():
-        raise ConfigError("broker.url must be a non-empty string")
-
-    broker = BrokerConfig(target=target, url=url)
+    broker = _validate_broker(raw["broker"])
 
     demo_mode_raw = raw["demo_mode"]
     if not isinstance(demo_mode_raw, bool):
@@ -238,6 +266,63 @@ def _validate(raw: dict[str, Any]) -> SimulatorConfig:
         broker=broker,
         demo_mode=demo_mode_raw,
     )
+
+
+def _validate_broker(raw: Any) -> BrokerConfig:
+    if not isinstance(raw, dict):
+        raise ConfigError(
+            f"`broker` must be a mapping, got {type(raw).__name__}"
+        )
+
+    # broker has both required and optional keys, so we don't use
+    # _assert_exact_keys here. tls is optional in the schema but its
+    # presence is conditional on target (validated below).
+    actual = set(raw.keys())
+    missing = _BROKER_REQUIRED_KEYS - actual
+    unknown = actual - (_BROKER_REQUIRED_KEYS | _BROKER_OPTIONAL_KEYS)
+    if missing or unknown:
+        parts: list[str] = []
+        if missing:
+            parts.append(f"missing keys: {sorted(missing)}")
+        if unknown:
+            parts.append(f"unknown keys: {sorted(unknown)}")
+        raise ConfigError("broker schema mismatch — " + "; ".join(parts))
+
+    target = _enum_from(raw["target"], BrokerTarget, "broker.target")
+
+    url = raw["url"]
+    if not isinstance(url, str) or not url.strip():
+        raise ConfigError("broker.url must be a non-empty string")
+
+    tls_raw = raw.get("tls")
+    if target is BrokerTarget.AWS_IOT:
+        if tls_raw is None:
+            raise ConfigError(
+                "broker.tls is required when broker.target is 'aws-iot' "
+                "(mTLS material paths cert_path/key_path/ca_path)"
+            )
+        tls: Optional[TlsConfig] = _validate_tls(tls_raw)
+    else:  # LOCAL
+        if tls_raw is not None:
+            raise ConfigError(
+                "broker.tls must not be set when broker.target is 'local' "
+                "(local Mosquitto runs unauthenticated for the dev loop)"
+            )
+        tls = None
+
+    return BrokerConfig(target=target, url=url, tls=tls)
+
+
+def _validate_tls(raw: Any) -> TlsConfig:
+    if not isinstance(raw, dict):
+        raise ConfigError(
+            f"broker.tls must be a mapping, got {type(raw).__name__}"
+        )
+    _assert_exact_keys(raw, _TLS_KEYS, "broker.tls")
+    cert_path = _as_non_empty_str(raw["cert_path"], "broker.tls.cert_path")
+    key_path = _as_non_empty_str(raw["key_path"], "broker.tls.key_path")
+    ca_path = _as_non_empty_str(raw["ca_path"], "broker.tls.ca_path")
+    return TlsConfig(cert_path=cert_path, key_path=key_path, ca_path=ca_path)
 
 
 def _assert_exact_keys(raw: dict[str, Any], expected: set[str], where: str) -> None:
@@ -271,6 +356,12 @@ def _as_float(value: Any, field: str) -> float:
             f"{field} must be a number, got {type(value).__name__}"
         )
     return float(value)
+
+
+def _as_non_empty_str(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"{field} must be a non-empty string")
+    return value
 
 
 def _enum_from(value: Any, enum_cls: type[Enum], field: str) -> Any:
