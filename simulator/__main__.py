@@ -9,9 +9,20 @@ and tunes it for their run.
 
 Ctrl-C (SIGINT) or SIGTERM triggers a clean shutdown: each per-pump task
 exits its Publisher context (disconnects cleanly), then ``run()`` returns.
-On Windows, where asyncio doesn't expose ``add_signal_handler``, the
-KeyboardInterrupt path inside ``asyncio.run`` cancels the tasks and we
-catch ``CancelledError`` in ``Fleet.run`` to achieve the same outcome.
+
+Signal handling uses a two-tier strategy (per Gemini Q8, 2026-05-25
+mqtt-publishing review):
+
+1. **Asyncio-native** via ``loop.add_signal_handler`` — preferred on
+   platforms where it works (Unix). The handler runs on the event loop
+   thread with no marshalling required.
+2. **Sync signal handler bridging into the loop** via ``signal.signal``
+   plus ``loop.call_soon_threadsafe`` — fallback on Windows
+   ProactorEventLoop, which doesn't expose ``add_signal_handler``. This
+   avoids the ``KeyboardInterrupt`` -> ``CancelledError`` -> aggressive
+   loop teardown chain that Windows previously fell back to, which could
+   leave the MQTT DISCONNECT packet unsent and surface as
+   "Task was destroyed but it is pending!" warnings.
 """
 
 from __future__ import annotations
@@ -47,17 +58,45 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-async def _run(fleet: Fleet) -> None:
-    loop = asyncio.get_running_loop()
-    # Wire ctrl-C / SIGTERM to a clean shutdown. add_signal_handler is
-    # not available on Windows ProactorEventLoop — there, KeyboardInterrupt
-    # propagates up through asyncio.run and the CancelledError path in
-    # Fleet.run handles graceful teardown.
+def _install_shutdown_handlers(
+    loop: asyncio.AbstractEventLoop, fleet: Fleet
+) -> None:
+    """Wire SIGINT and SIGTERM to ``fleet.request_shutdown``.
+
+    Tries the asyncio-native API first; falls back to a sync ``signal``
+    handler that hops into the loop via ``call_soon_threadsafe`` (this
+    works on Windows ProactorEventLoop, where ``add_signal_handler``
+    raises ``NotImplementedError``).
+    """
     try:
         loop.add_signal_handler(signal.SIGINT, fleet.request_shutdown)
         loop.add_signal_handler(signal.SIGTERM, fleet.request_shutdown)
+        return
     except (NotImplementedError, RuntimeError):
+        # Asyncio-native handlers unavailable (Windows ProactorEventLoop,
+        # or we're not on the main thread). Fall through to signal.signal.
         pass
+
+    def _bridge(signum, frame):  # noqa: ARG001 — signal API shape
+        try:
+            loop.call_soon_threadsafe(fleet.request_shutdown)
+        except RuntimeError:
+            # Loop already closed mid-shutdown; nothing more to do.
+            pass
+
+    # signal.signal works on the main thread (which is where asyncio.run
+    # puts us). SIGTERM may not exist or may not be settable in all
+    # Windows configurations — swallow the relevant exceptions.
+    signal.signal(signal.SIGINT, _bridge)
+    try:
+        signal.signal(signal.SIGTERM, _bridge)
+    except (ValueError, AttributeError, OSError):
+        pass
+
+
+async def _run(fleet: Fleet) -> None:
+    loop = asyncio.get_running_loop()
+    _install_shutdown_handlers(loop, fleet)
     await fleet.run()
 
 
@@ -82,11 +121,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         asyncio.run(_run(fleet))
     except KeyboardInterrupt:
-        # On Windows, KeyboardInterrupt may bubble out of asyncio.run
-        # before our signal handlers (or their absence) take effect. The
-        # per-pump tasks will have been cancelled by asyncio.run's
-        # teardown, which routes through Fleet.run's CancelledError branch
-        # and disconnects each Publisher cleanly.
+        # Paranoia backstop: with the sync signal bridge installed, SIGINT
+        # is consumed before Python translates it to KeyboardInterrupt.
+        # This branch only fires if signal-handler installation failed
+        # entirely (e.g., running on a non-main thread). The Fleet.run
+        # CancelledError path still handles the cleanup.
         pass
     return 0
 

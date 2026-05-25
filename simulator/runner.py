@@ -13,6 +13,15 @@ single asyncio event loop (per ADR 0003). On ``run()``:
   picked at session-brief time (Q4): a real fleet has pumps going offline
   all the time; a single pump's bad day shouldn't stop the rest.
 
+Backoff is reset on each **successful publish**, not on each successful
+connect. Resetting on connect (the original implementation) opened a
+flapping vulnerability: a publisher that connects cleanly but is denied
+permission to publish (e.g., an AWS IoT policy that allows MQTT CONNECT
+but not PUBLISH on the topic) would loop forever at the 1s initial
+backoff, never reaching the 30s cap. Resetting on successful publish
+requires actually getting one message through before we trust the
+connection. Per Gemini Q3, 2026-05-25 mqtt-publishing review.
+
 The non-healthy-scenario and aws-iot-not-wired ``NotImplementedError``
 guards live in ``Fleet.from_config`` — caught at the top of the stack so a
 user with a bad config sees a clear message before any pump tries to
@@ -164,10 +173,11 @@ class Fleet:
         """Ask all per-pump tasks to wind down.
 
         Safe to call from a signal handler installed via
-        ``loop.add_signal_handler``. Per-pump tasks check the event between
-        publishes and between backoff sleeps, so a shutdown request lands
-        within at most ``tick_seconds`` (or ``MAX_BACKOFF_SECONDS`` for a
-        task currently in backoff).
+        ``loop.add_signal_handler`` or via ``signal.signal`` +
+        ``loop.call_soon_threadsafe``. Per-pump tasks check the event
+        between publishes and between backoff sleeps, so a shutdown
+        request lands within at most ``tick_seconds`` (or
+        ``MAX_BACKOFF_SECONDS`` for a task currently in backoff).
         """
         self._ensure_shutdown().set()
 
@@ -205,14 +215,15 @@ class Fleet:
         while not shutdown.is_set():
             try:
                 async with publisher:
-                    # Successful connect: reset backoff so the next failure
-                    # starts fresh rather than inheriting the previous run's
-                    # ceiling.
-                    backoff = INITIAL_BACKOFF_SECONDS
                     log.info("pump %s connected", pump.pump_id)
                     while not shutdown.is_set():
                         reading = pump.step()
                         await publisher.publish(topic, reading)
+                        # Reset backoff on each successful publish (NOT on
+                        # connect). See module docstring + ADR 0003 for the
+                        # flapping vulnerability this closes (Gemini Q3,
+                        # 2026-05-25 mqtt-publishing review).
+                        backoff = INITIAL_BACKOFF_SECONDS
                         if await self._wait_or_shutdown(
                             self._tick_seconds, shutdown
                         ):

@@ -3,7 +3,9 @@
 Uses an in-memory ``FakePublisher`` (records publishes, optionally fails a
 fixed number of connects) so the runner is exercised without a real
 broker. Backoff constants are monkeypatched to milliseconds where needed
-so the time-based tests finish quickly.
+so the time-based tests finish quickly; the exact-sequence test (Q7) uses
+a monkeypatched ``_wait_or_shutdown`` to capture the backoff math
+deterministically without any real sleep.
 """
 
 from __future__ import annotations
@@ -152,8 +154,7 @@ def test_from_config_builds_pumps_with_seeded_ids():
     assert len(fleet.members) == 3
     ids = [pump.pump_id for pump, _ in fleet.members]
     assert ids == ["P-00", "P-01", "P-02"]
-    # base_seed=100 -> pump seeds 100, 101, 102. Verifying reproducibility
-    # via the first tick's RPM (deterministic given seed + ambient + setpoint).
+    # base_seed=100 -> pump seeds 100, 101, 102.
     pumps = [p for p, _ in fleet.members]
     assert pumps[0].degradation == 0.0  # before any step
     assert pumps[0].state is PumpState.HEALTHY
@@ -273,9 +274,12 @@ def test_fleet_run_handles_shutdown_before_any_publish():
     assert len(pubs[0].published) <= 1
 
 
-def test_fleet_run_retries_on_publisher_error(monkeypatch):
+def test_fleet_run_continues_after_failed_connects(monkeypatch):
     """A FlakyPublisher that fails the first 2 connect attempts should
-    eventually succeed; the runner reconnects with backoff and proceeds."""
+    eventually succeed; the runner reconnects with backoff and proceeds.
+    Verifies the broad "connect-retry loop reaches a successful state"
+    property — exact backoff math is covered by
+    ``test_fleet_backoff_climbs_to_cap_then_holds``."""
     from simulator.pump import Pump
     import simulator.runner as runner_module
 
@@ -336,34 +340,120 @@ def test_fleet_run_isolates_per_pump_failures(monkeypatch):
     assert pubs[1].connect_attempts >= 1  # but did try
 
 
-def test_fleet_run_resets_backoff_on_successful_connect(monkeypatch):
-    """After 2 failed connects (climbing backoff to ~2x initial), a
-    successful connect followed by a future failure should restart at
-    INITIAL_BACKOFF_SECONDS, not at the previous run's ceiling. Verified
-    indirectly via the FlakyPublisher's connect_attempts."""
+def test_fleet_backoff_climbs_to_cap_then_holds(monkeypatch):
+    """Per Gemini Q3+Q7 (2026-05-25 mqtt-publishing review): a publisher
+    that keeps failing connect must produce backoffs of exactly
+    [1, 2, 4, 8, 16, 30, 30, ...], with the cap engaging at the 6th
+    failure and holding thereafter.
+
+    The original implementation reset backoff on successful CONNECT,
+    which opened a flapping vulnerability (a publisher that connects but
+    is denied PUBLISH would loop forever at 1s, never reaching the cap).
+    The current implementation resets on successful PUBLISH, so a
+    connect-only success doesn't bypass the cap. This test exercises the
+    pure climb-to-cap path with a publisher that never connects.
+
+    Implementation note: we monkeypatch ``Fleet._wait_or_shutdown`` to
+    capture the requested backoff durations without actually sleeping.
+    Per Gemini's suggestion (Q7), this gives deterministic coverage of
+    the backoff math without flaky timing.
+    """
     from simulator.pump import Pump
     import simulator.runner as runner_module
 
-    monkeypatch.setattr(runner_module, "INITIAL_BACKOFF_SECONDS", 0.001)
-    monkeypatch.setattr(runner_module, "MAX_BACKOFF_SECONDS", 0.005)
+    monkeypatch.setattr(runner_module, "INITIAL_BACKOFF_SECONDS", 1.0)
+    monkeypatch.setattr(runner_module, "MAX_BACKOFF_SECONDS", 30.0)
+
+    recorded_waits: list[float] = []
+
+    async def _recording_wait(seconds: float, shutdown: asyncio.Event) -> bool:
+        recorded_waits.append(seconds)
+        # Let the test collect 7 backoff values, then return True (the
+        # signal that means "shutdown observed — exit the retry loop").
+        return len(recorded_waits) >= 7
+
+    monkeypatch.setattr(
+        runner_module.Fleet,
+        "_wait_or_shutdown",
+        staticmethod(_recording_wait),
+    )
 
     pumps = [Pump("P-00", seed=0)]
-    pubs = [FlakyPublisher(fail_count=2, pump_id="P-00")]
-    fleet = Fleet(list(zip(pumps, pubs)), tick_seconds=0.001)
+    pubs = [FlakyPublisher(fail_count=1_000_000, pump_id="P-00")]
+    fleet = Fleet(list(zip(pumps, pubs)), tick_seconds=999.0)
 
     async def _go():
-        run_task = asyncio.create_task(fleet.run())
-        for _ in range(500):
-            await asyncio.sleep(0.001)
-            if len(pubs[0].published) >= 2:
-                break
-        fleet.request_shutdown()
-        await asyncio.wait_for(run_task, timeout=1.0)
+        await asyncio.wait_for(fleet.run(), timeout=1.0)
 
     _run(_go())
-    # The publisher connected successfully exactly once after 2 failures.
-    # We don't directly observe backoff, but we DO observe that the retry
-    # loop took only 3 attempts (the 2 failures plus 1 success), proving
-    # the inner publish loop ran after reconnect.
-    assert pubs[0].connect_attempts == 3
-    assert pubs[0].connects == 1
+
+    assert recorded_waits == [1.0, 2.0, 4.0, 8.0, 16.0, 30.0, 30.0]
+
+
+def test_fleet_backoff_resets_on_successful_publish(monkeypatch):
+    """Per Gemini Q3 (2026-05-25 mqtt-publishing review): backoff resets
+    on a successful publish, NOT on a successful connect.
+
+    Strategy: a publisher that connects, fails to publish on the first
+    attempt, reconnects (which exits via aexit and restarts the outer
+    loop), publishes once successfully, then fails on the next publish.
+    The first failure-cycle's backoff wait should be 1.0s. After the
+    successful publish in between, the next failure-cycle's wait should
+    ALSO be 1.0s (reset by the publish), NOT 2.0s.
+    """
+    from simulator.pump import Pump
+    import simulator.runner as runner_module
+
+    monkeypatch.setattr(runner_module, "INITIAL_BACKOFF_SECONDS", 1.0)
+    monkeypatch.setattr(runner_module, "MAX_BACKOFF_SECONDS", 30.0)
+
+    class PublishOncePublisher(FakePublisher):
+        """Connects fine. First publish raises; second publish succeeds
+        (and resets backoff); third publish raises.
+        """
+
+        def __init__(self, pump_id: str = "P-??") -> None:
+            super().__init__(pump_id=pump_id)
+            self._publish_calls = 0
+
+        async def publish(self, topic, payload):
+            self._publish_calls += 1
+            if self._publish_calls in (1, 3):
+                raise PublisherError(
+                    f"simulated publish failure (call={self._publish_calls})"
+                )
+            await super().publish(topic, payload)
+
+    # Use a tick value that's clearly distinguishable from any backoff
+    # value (backoffs climb 1, 2, 4, ..., 30) so we can filter the
+    # post-publish "wait one tick" calls out of the recorded sequence.
+    TICK_SECONDS = 99.0
+
+    recorded_backoffs: list[float] = []
+
+    async def _recording_wait(seconds: float, shutdown: asyncio.Event) -> bool:
+        if seconds != TICK_SECONDS:
+            recorded_backoffs.append(seconds)
+        # Exit after collecting 2 backoff values — one per failure cycle.
+        return len(recorded_backoffs) >= 2
+
+    monkeypatch.setattr(
+        runner_module.Fleet,
+        "_wait_or_shutdown",
+        staticmethod(_recording_wait),
+    )
+
+    pumps = [Pump("P-00", seed=0)]
+    pubs = [PublishOncePublisher(pump_id="P-00")]
+    fleet = Fleet(list(zip(pumps, pubs)), tick_seconds=TICK_SECONDS)
+
+    async def _go():
+        await asyncio.wait_for(fleet.run(), timeout=1.0)
+
+    _run(_go())
+
+    # Both failure cycles should have used the INITIAL backoff: the
+    # successful publish in between reset the counter.
+    assert recorded_backoffs == [1.0, 1.0]
+    # One publish actually made it through.
+    assert len(pubs[0].published) == 1
