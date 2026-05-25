@@ -1,0 +1,9 @@
+# Runtime dependencies for the ML Observability Pipeline.
+#
+# Kept minimal on purpose. Each new line should be justified in the session
+# log that added it; see DEV_NORMS section 6.2.
+#
+# Dev-only deps (pytest, ruff, mypy, etc.) will land in requirements-dev.txt
+# once we add CI or a dev_workflow session declares them.
+
+PyYAML>=6.0    # simulator/config.py — config-yaml session 2026-05-25

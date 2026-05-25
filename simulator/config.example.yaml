@@ -1,0 +1,59 @@
+# simulator/config.example.yaml — annotated example.
+#
+# Copy this file to `simulator/config.yaml` (gitignored by default) and tune
+# for your run. The loader in `simulator/config.py` enforces:
+#   - every top-level key below is required (no silent defaults)
+#   - unknown keys raise (catches typos like `pump_cont: 15`)
+#   - types are checked strictly (booleans are NOT integers, integers are
+#     NOT floats, etc.)
+#
+# Run `python -c "from simulator.config import load_config; print(load_config('simulator/config.yaml'))"`
+# to sanity-check after edits.
+
+fleet:
+  # Number of pumps in the simulated fleet. PLAN.md targets ~15.
+  # Range [1, 50]. Above 50 starts to stress single-PC local mode.
+  pump_count: 15
+
+  # Nominal RPM each pump targets when HEALTHY. Real-world centrifugal
+  # pumps run 1750-3500 RPM; 1800 matches PLAN.md §2.2.
+  # Range [1.0, 10000.0].
+  setpoint_rpm: 1800.0
+
+  # Ambient air temperature near the pump. Drives the baseline of
+  # `bearing_temp = ambient + 0.02*rpm + ...` per ADR 0002.
+  # Range [-50.0, 80.0]. 22.0 = comfortable indoor industrial floor.
+  ambient_celsius: 22.0
+
+  # Per-pump RNG seed is `base_seed + pump_index` (0-indexed). Change this
+  # to get a different but reproducible run; leave at 0 for byte-identical
+  # runs across machines.
+  base_seed: 0
+
+# Which demo scenario to drive the fleet with.
+#
+# Only `healthy` is wired this session (config-yaml). The other three are
+# accepted at load time so demo manifests can be authored ahead of the
+# scenario runner, but trying to actually *run* them today is a no-op
+# (only HEALTHY-state behavior is implemented).
+#
+# Allowed: healthy | seasonal_drift | fleet_expansion | real_failure
+scenario: healthy
+
+broker:
+  # Where telemetry will be published (no client is wired this session).
+  # Allowed: local | aws-iot
+  target: local
+  # URL is validated as a non-empty string but not parsed — the (future)
+  # MQTT client owns format validation. Mosquitto default for `local`;
+  # `aws-iot` will need the IoT Core endpoint here.
+  url: "mqtt://localhost:1883"
+
+# Compress HEALTHY dwell so a fresh clone exercises the full
+# HEALTHY -> DEGRADING -> FAILING -> FAILED arc in a few minutes. Without
+# this, HEALTHY dwell defaults to ~24h (43,200 ticks @ 2s/tick) which is
+# realistic but recruiter-hostile. Effective HEALTHY dwell when true: 60
+# ticks (~2 min). DEGRADING/FAILING/FAILED dwells are unaffected.
+#
+# Leave false for "realistic" runs; flip to true for demos.
+demo_mode: false
