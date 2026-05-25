@@ -1,14 +1,24 @@
 """Pump physical model + lifecycle state machine.
 
-Implements PLAN.md §2.2:
+Implements PLAN.md §2.2 (with one ADR-tracked deviation on RPM):
 
     bearing_temp   = ambient + 0.02 * RPM + degradation * 15  + N(0, 0.5)
     vibration_amp  = 0.3            + degradation * 2.5       + N(0, 0.05)
     motor_current  = 4.0            + degradation * 1.2       + N(0, 0.1)
-    RPM            = setpoint                                 + N(0, 5)
+    RPM            = setpoint * (1 - degradation) + N(0, 5 + 15 * degradation)
+                     # per ADR 0002 — original spec was RPM = setpoint + N(0, 5),
+                     # but that left FAILED pumps emitting healthy RPM, which is
+                     # physically implausible (failed pumps slow / seize).
 
 `degradation ∈ [0, 1]`. State machine per pump:
 HEALTHY → DEGRADING → FAILING → FAILED with configurable dwell times.
+
+Degradation evolves as a per-state linear ramp toward a per-state ceiling
+(see ``DEFAULT_PROFILES``). This is a deliberate simplification — real
+mechanical wear follows the P-F (Potential-to-Failure) curve with
+exponential acceleration near failure. Linear was chosen for predictable,
+testable envelopes and to keep tuning out of the critical path; the
+downstream scoring/drift pipeline is what we actually want to exercise.
 
 `.step()` returns a telemetry dict matching context/_interfaces.md. MQTT
 publishing lives in a later session — this module is pure simulation.
@@ -18,7 +28,7 @@ from __future__ import annotations
 
 import random
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
@@ -77,6 +87,12 @@ class StateProfile:
 #   - FAILING:  ~5 minutes (150 ticks @ 2s) of accelerating wear up to 0.85.
 #   - FAILED:   pinned to 1.0, never auto-leaves.
 # All overrideable via the Pump constructor.
+#
+# TODO (config-yaml session): 43_200 ticks for HEALTHY (~24h) is realistic
+# but recruiter-hostile — anyone cloning the repo to see the lifecycle would
+# wait a full day at default settings. When the YAML loader lands, expose a
+# `demo_mode` shortcut that compresses HEALTHY dwell to ~60 ticks so the full
+# HEALTHY → FAILED arc unfolds in <5 minutes for a local demo run.
 DEFAULT_PROFILES: dict[PumpState, StateProfile] = {
     PumpState.HEALTHY: StateProfile(
         rate_per_tick=0.0, ceiling=0.05, dwell_ticks=43_200  # ~24h @ 2s/tick
@@ -94,27 +110,7 @@ DEFAULT_PROFILES: dict[PumpState, StateProfile] = {
 
 
 class Pump:
-    """Single simulated industrial pump.
-
-    Parameters
-    ----------
-    pump_id:
-        Fleet identifier, must match ``P-NN`` (zero-padded).
-    ambient:
-        Ambient temperature in °C. Feeds the bearing-temp equation.
-    setpoint:
-        Target RPM. Actual RPM is setpoint + N(0, 5).
-    seed:
-        Optional integer seed for the pump's private RNG. Two pumps with the
-        same seed and same call sequence will produce identical telemetry.
-    initial_state:
-        Starting lifecycle state. Defaults to HEALTHY.
-    profiles:
-        Optional override map for per-state ``StateProfile``s. Missing keys
-        fall back to ``DEFAULT_PROFILES``.
-    initial_degradation:
-        Starting value of ``degradation``. Useful for tests. Clamped to [0, 1].
-    """
+    """Single simulated industrial pump."""
 
     def __init__(
         self,
@@ -144,19 +140,13 @@ class Pump:
         self._ticks_in_state: int = 0
         self._degradation: float = float(initial_degradation)
 
-        # Build the per-state profile map: caller overrides win, defaults fill gaps.
         merged: dict[PumpState, StateProfile] = dict(DEFAULT_PROFILES)
         if profiles:
             merged.update(profiles)
         self._profiles: dict[PumpState, StateProfile] = merged
 
-        # If we started directly in FAILED, snap degradation to 1.0 to match
-        # the "pinned" semantic. Avoids needing a real .step() to enter the
-        # pinned regime in tests.
         if self._state is PumpState.FAILED:
             self._degradation = 1.0
-
-    # -- Public read-only properties ----------------------------------------
 
     @property
     def pump_id(self) -> str:
@@ -174,19 +164,8 @@ class Pump:
     def ticks_in_state(self) -> int:
         return self._ticks_in_state
 
-    # -- State control ------------------------------------------------------
-
     def force_state(self, state: PumpState) -> None:
-        """Manually transition to ``state``.
-
-        Resets the in-state tick counter. Used by scenario scripts (drift
-        demos drive transitions deterministically rather than waiting for
-        dwell timers).
-
-        Snaps degradation to 1.0 when entering FAILED so the FAILED-pinned
-        invariant holds immediately, not just after the first .step().
-        """
-
+        """Manually transition to ``state``. Resets the in-state tick counter."""
         if not isinstance(state, PumpState):
             raise TypeError(f"state must be a PumpState, got {type(state).__name__}")
         self._state = state
@@ -194,53 +173,35 @@ class Pump:
         if state is PumpState.FAILED:
             self._degradation = 1.0
 
-    # -- Tick ---------------------------------------------------------------
-
     def step(self, now: Optional[datetime] = None) -> dict:
         """Advance one tick and return a telemetry reading.
 
-        The order is: (1) advance degradation under the current state's rule,
-        (2) sample sensor noise, (3) check whether dwell elapsed → auto-advance.
-        Step (3) happens AFTER emission so a tick emitted "in state X" still
-        reflects X's noise envelope; the transition takes effect on the NEXT
-        tick.
-
-        Parameters
-        ----------
-        now:
-            Timestamp to stamp on the reading. Defaults to ``datetime.now(UTC)``.
-            Injectable for deterministic tests.
-
-        Returns
-        -------
-        dict
-            Telemetry payload matching context/_interfaces.md exactly:
-            ``{pump_id, ts, vibration_amp, bearing_temp, motor_current, rpm}``.
+        Order: (1) advance degradation, (2) sample sensor noise, (3) check
+        auto-transition. Step (3) happens AFTER emission so a tick "in state X"
+        reflects X's envelope; the transition takes effect on the NEXT tick.
         """
-
         self._advance_degradation()
         reading = self._sample(now)
         self._ticks_in_state += 1
         self._maybe_auto_transition()
         return reading
 
-    # -- Internals ----------------------------------------------------------
-
     def _advance_degradation(self) -> None:
         profile = self._profiles[self._state]
         if self._state is PumpState.FAILED:
-            # Pinned. Even if a caller tinkered with profiles, FAILED stays at 1.
             self._degradation = 1.0
             return
         new_value = self._degradation + profile.rate_per_tick
-        # Clamp to the per-state ceiling AND the global [0, 1] invariant.
         self._degradation = max(0.0, min(profile.ceiling, new_value, 1.0))
 
     def _sample(self, now: Optional[datetime]) -> dict:
         rng = self._rng
         d = self._degradation
 
-        rpm = self._setpoint + rng.gauss(0.0, 5.0)
+        # RPM couples to degradation per ADR 0002 (supersedes PLAN.md §2.2):
+        # a failing pump slows down, a fully failed pump is near-stationary
+        # with high stutter. Original spec was rpm = setpoint + N(0, 5).
+        rpm = self._setpoint * (1.0 - d) + rng.gauss(0.0, 5.0 + 15.0 * d)
         bearing_temp = self._ambient + 0.02 * rpm + d * 15.0 + rng.gauss(0.0, 0.5)
         vibration_amp = 0.3 + d * 2.5 + rng.gauss(0.0, 0.05)
         motor_current = 4.0 + d * 1.2 + rng.gauss(0.0, 0.1)
@@ -258,23 +219,19 @@ class Pump:
     def _maybe_auto_transition(self) -> None:
         profile = self._profiles[self._state]
         if profile.dwell_ticks is None:
-            return  # terminal-by-config (FAILED, by default)
+            return
         if self._ticks_in_state < profile.dwell_ticks:
             return
         next_state = _next_state(self._state)
         if next_state is None:
-            return  # already at the end of the forward sequence
+            return
         self._state = next_state
         self._ticks_in_state = 0
         if next_state is PumpState.FAILED:
             self._degradation = 1.0
 
 
-# -- Module helpers ---------------------------------------------------------
-
-
 def _next_state(state: PumpState) -> Optional[PumpState]:
-    """Return the next state in the forward lifecycle, or None at the end."""
     idx = _FORWARD_SEQUENCE.index(state)
     if idx + 1 >= len(_FORWARD_SEQUENCE):
         return None
@@ -282,15 +239,10 @@ def _next_state(state: PumpState) -> Optional[PumpState]:
 
 
 def _iso8601_ms(ts: datetime) -> str:
-    """Format ``ts`` as ISO-8601 UTC with millisecond precision and a 'Z' suffix.
-
-    Matches the example in context/_interfaces.md:
-        "2026-05-24T14:32:01.123Z"
-    """
+    """ISO-8601 UTC with millisecond precision and a 'Z' suffix."""
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
     else:
         ts = ts.astimezone(timezone.utc)
-    # Truncate microseconds to milliseconds (no rounding — deterministic).
     ms = ts.microsecond // 1000
     return f"{ts.strftime('%Y-%m-%dT%H:%M:%S')}.{ms:03d}Z"

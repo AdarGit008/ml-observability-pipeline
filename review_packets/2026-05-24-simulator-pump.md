@@ -1,7 +1,7 @@
 # Review Packet 2026-05-24 — simulator — pump-model-and-state-machine
 
 > Paste this entire file into Gemini via:
-> `gemini -p "$(cat review_packets/2026-05-24-simulator-pump.md)" > review_responses/2026-05-24-simulator-pump.md`
+> `.\scripts\gemini_review.ps1 -Slug simulator-pump`
 
 ## Role for Gemini
 You are an adversarial-but-fair code reviewer for a portfolio project. Your job is not to rubber-stamp. Surface risks, design weaknesses, and trade-offs that the author may have rationalized past. Cite specific files and lines when possible.
@@ -22,51 +22,7 @@ First implementation pass on the `simulator` component. Adds `simulator/pump.py`
 Four new files. Inline below in dependency order.
 
 ### `.gitignore` (first commit)
-```
-# Python
-__pycache__/
-*.py[cod]
-*.so
-.Python
-*.egg-info/
-.venv/
-venv/
-.pytest_cache/
-.coverage
-htmlcov/
-.mypy_cache/
-.ruff_cache/
-
-# Terraform
-# Note: .terraform.lock.hcl is intentionally NOT ignored (HashiCorp guidance —
-# commit it so provider versions stay reproducible across machines).
-.terraform/
-*.tfstate
-*.tfstate.*
-*.tfvars
-!*.tfvars.example
-crash.log
-crash.*.log
-.terraformrc
-terraform.rc
-
-# Project secrets / certs (per _interfaces.md §2.4 — IoT x.509 certs)
-simulator/.secrets/
-**/.env
-*.pem
-*.key
-*.crt
-
-# Local data (Docker volumes — InfluxDB, Mosquitto persistence when local_runtime lands)
-data/
-local_runtime/data/
-
-# IDE / OS
-.vscode/
-.idea/
-.DS_Store
-Thumbs.db
-```
+[Inline omitted for brevity in this revision; see file at repo root.]
 
 ### `simulator/__init__.py`
 ```python
@@ -87,71 +43,38 @@ See full file at the path above. Key design choices made on top of the §2.2 spe
 | Choice | What I picked | Why |
 |---|---|---|
 | Degradation trajectory | Per-state `rate_per_tick` + `ceiling`, accumulated each `.step()`, clamped to `[0, 1]` | Simplest first-principles model; ceilings make per-state envelopes visible and testable. |
-| FAILED behavior | Keep emitting telemetry, `degradation` pinned to 1.0 | Lets downstream scoring/drift see the failure rather than starving. (a)/(c) alternatives would force a separate code path. |
+| FAILED behavior | Keep emitting telemetry, `degradation` pinned to 1.0 | Lets downstream scoring/drift see the failure rather than starving. |
 | State advancement | Automatic by `dwell_ticks`, plus manual `force_state()` | Auto-advance for "let it run" demos; manual override for scripted drift scenarios. |
 | RNG | Pump-private `random.Random(seed)` | Deterministic tests, no global-state contamination. |
-| Timestamps | `step(now=...)` injectable, default `datetime.now(UTC)`; format `YYYY-MM-DDTHH:MM:SS.mmmZ` (truncate µs → ms) | Reproducible test assertions; matches `_interfaces.md` example exactly. |
+| Timestamps | `step(now=...)` injectable, default `datetime.now(UTC)`; format `YYYY-MM-DDTHH:MM:SS.mmmZ` | Reproducible test assertions; matches `_interfaces.md`. |
 | Defaults | `ambient=22.0`, `setpoint=1800.0`, dwell=24h/200/200/∞ | Recruiter-readable, mentioned in code comments. |
 
-Tick order in `step()`:
-1. Advance degradation (apply rate, clamp to ceiling, clamp to [0,1]).
-2. Sample sensor noise → build telemetry dict.
-3. Increment `ticks_in_state`.
-4. Check `dwell_ticks` → maybe auto-transition to next state.
-
-→ Step 4 happens *after* emission, so a reading "in state X" reflects X's envelope; the transition takes effect on the next tick. Calling this out because it's a judgment call (alternative: transition first, then sample).
-
-### `simulator/tests/test_pump.py`
-29 pytest tests. Test inventory:
-
-```
-pump_id validation:      6 parametrized rejects + 1 accept
-telemetry dict shape:    keys, types, pump_id roundtrip          (3)
-timestamps:              ISO-8601 ms, naive→UTC, default recent  (3)
-HEALTHY:                 initial=0, stays under ceiling, band    (3)
-DEGRADING:               monotonic rise, ceiling cap             (2)
-FAILING:                 hotter than DEGRADING at same seed      (1)
-FAILED:                  pinned, still emits, no auto-advance    (3)
-Transitions:             auto through all four, manual force,    (3)
-                         force rejects non-PumpState
-Reproducibility:         same seed identical, diff seed diverges (2)
-Constructor validation:  out-of-range deg, FAILED snaps to 1     (2)
-                                                          TOTAL: 29
-```
-
-All pass in ~0.06s.
-
 ## Specific questions for Gemini
-
-1. **Degradation-trajectory model.** I picked a per-state `(rate_per_tick, ceiling)` pair, linearly accumulating. PLAN.md §2.2 says "configurable dwell times" but gives no trajectory shape. Is a linear-ramp-to-ceiling defensible as "first-principles" per `simulator.md`'s open question? What would a more physically realistic model look like (e.g. nonlinear acceleration in FAILING, shock spikes, partial-recovery on maintenance) and is it worth the complexity *for a portfolio piece*?
-
-2. **Tick ordering.** In `Pump.step()` I advance degradation → sample → then check auto-transition. Should the transition check happen *before* sampling instead, so a tick that crosses a state boundary reflects the new state's envelope? Or is the current "emit reflects entering-state, transition affects next tick" semantic cleaner?
-
-3. **RPM is independent of degradation.** PLAN.md §2.2's RPM equation has no degradation term: `RPM = setpoint + N(0, 5)`. So a FAILED pump still emits ~1800 RPM, which is physically implausible — real failed pumps don't spin at setpoint. Strict adherence to §2.2 vs. realism: should I add a degradation-coupled RPM term (e.g. `RPM = setpoint * (1 - 0.5*degradation) + N(0, 5 + 20*degradation)`) and update §2.2 via an ADR, or stay literal?
-
-4. **Test for "FAILING hotter than DEGRADING"** (`test_failing_telemetry_hotter_than_degrading`). I instantiate each pump at the state's *ceiling* degradation to compare steady-state envelopes. Does this hide a bug — e.g. if the ceiling-enforcement code were wrong but the rate-only difference still happened to produce the right inequality? Should I also assert from-zero-rampup behavior?
-
-5. **Default dwell times.** HEALTHY=43_200 ticks (~24h real time), DEGRADING=200, FAILING=200, FAILED=∞. These are educated guesses, not calibrated against any dataset. `simulator.md` open question Q2 (NASA IMS / Case Western Reserve) suggests data-calibrated alternatives. Should the v1 commit (a) keep first-principles defaults as documented, (b) defer until calibration data is reviewed, or (c) cite a paper / specsheet for at least the orders of magnitude?
-
-6. **Hidden AWS-specificity.** Per north star #4 (mode parity), nothing in `pump.py` should presume the AWS path. Is there anything in this module that quietly couples to AWS (e.g. timestamp format that AWS IoT prefers and Mosquitto doesn't, an envelope shape that only Lambda needs)?
-
-7. **The two `Pump(...)` calls inside `test_degrading_caps_at_ceiling`.** I shadow the first `p` with a re-constructed `p` that has a long-dwell profile. The first construction is unused after the rewrite. Bug or intentional? (Calling out: it's a leftover from an earlier iteration — please confirm whether to keep the structure for readability or delete the dead instantiation.)
+1. Degradation-trajectory model — defensible as first-principles?
+2. Tick ordering — emit-reflects-entering vs transition-then-sample?
+3. RPM independent of degradation — strict to §2.2 or add coupling?
+4. Test fairness — does the at-ceiling comparison hide a derivative bug?
+5. Default dwell times — keep, defer, or cite a source?
+6. Hidden AWS-specificity — anything that quietly couples to the AWS path?
+7. The two `Pump(...)` calls in `test_degrading_caps_at_ceiling` — keep or delete?
 
 ## What I'm NOT looking for in this review
-- Style / lint nits — a separate `ruff`/`black` pass will run before merge.
-- MQTT publishing logic — explicitly out of scope per session brief; coming in a later session.
-- Config-file (YAML) loading — separate session.
-- More coverage of dwell-tick *boundary* arithmetic — already covered by `test_auto_transitions_through_all_four_states` with `FAST_DWELL` (dwell=2).
-- AWS infra concerns — no Terraform touched.
+- Style / lint nits.
+- MQTT publishing logic — out of scope.
+- Config-file loading — separate session.
 
-## Resolution (filled in by Claude after Gemini responds)
+## Resolution (filled in 2026-05-25 after Gemini response)
 
-| Gemini point | Disposition | Notes |
+| # | Disposition | Notes |
 |---|---|---|
-| 1. | Addressed / Deferred / Rejected | |
-| 2. | | |
-| 3. | | |
-| 4. | | |
-| 5. | | |
-| 6. | | |
-| 7. | | |
+| 1. Linear ramp vs P-F curve | **Addressed** | Added a docstring paragraph in `pump.py` acknowledging real degradation follows the P-F curve with exponential acceleration; rationale (predictable test envelopes, pipeline-first focus) made explicit. |
+| 2. Tick ordering | **Confirmed (no change)** | Gemini agreed with the Moore-machine semantic (emit reflects entering-state; transition-then-sample would create an off-by-one attribution bug). |
+| 3. RPM independent of degradation | **Addressed via ADR 0002** | Replaced RPM equation: `RPM = setpoint * (1 - degradation) + N(0, 5 + 15 * degradation)`. PLAN.md §2.2 updated in-place; ADR 0002 is the authoritative justification. Cascade: `test_failing_telemetry_hotter_than_degrading` renamed to `..._higher_vibration_...` (bearing temp is no longer monotonic in degradation — physically correct), `test_failed_state_keeps_emitting_telemetry` envelope updated (RPM near 0 with stutter, bearing ≈37°C, vibration > 2.5). |
+| 4. Derivative-fairness test | **Addressed** | Added `test_failing_vibration_rises_faster_than_degrading_from_zero` — both states start at `degradation=0`, step 50 ticks, assert FAILING vibration > DEGRADING vibration + 0.05. Used 50 ticks instead of Gemini's suggested 10 because at 10 the per-state delta (~0.06) is barely above noise σ=0.05; 50 ticks puts S/N well above 3σ. |
+| 5. Default dwell times (24h HEALTHY recruiter-trap) | **Deferred to config-yaml session** | Added a TODO comment in `DEFAULT_PROFILES` documenting the trap and the planned `demo_mode` shortcut (compress HEALTHY to ~60 ticks). Don't want to add a constructor flag for it now — natural fit for the YAML loader. |
+| 6. Hidden AWS-specificity | **Confirmed (no change in this PR)** | ISO-8601-ms timestamps validated. Payload-size warning (AWS IoT bills per 5KB) carried forward to the lambda_s3_batcher / lambda_scorer sessions — noted in `context/_interfaces.md` follow-ups. |
+| 7. Dead `Pump()` instantiation | **Addressed** | Removed the shadowing first `Pump(...)` in `test_degrading_caps_at_ceiling`. Single instantiation now, comment clarifies the long-dwell override. |
+| Bonus — `.gitignore` additions | **Addressed** | Added `.envrc` (direnv) and `.python-version` (pyenv) with an attribution comment pointing at this review. |
+| Bonus — FAILED-state design choice (b) | **Confirmed** | Gemini validated: keep emitting at degradation=1.0 so downstream anomaly detection sees the failure rather than treating it as a network disconnect. |
+
+Final post-resolution test count: **30 passing, 0 failing** (added 1 derivative test, kept all original coverage). Test runtime ~0.06 s.

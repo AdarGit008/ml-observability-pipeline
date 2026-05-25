@@ -2,12 +2,11 @@
 
 Covers the four-state lifecycle (HEALTHY → DEGRADING → FAILING → FAILED),
 telemetry-dict shape against context/_interfaces.md, reproducibility,
-and timestamp formatting.
+timestamp formatting, and the ADR-0002 RPM/degradation coupling.
 """
 
 from __future__ import annotations
 
-import re
 from datetime import datetime, timezone
 from statistics import mean
 
@@ -78,7 +77,6 @@ def test_timestamp_iso8601_ms_format():
     p = Pump("P-01", seed=0)
     fixed = datetime(2026, 5, 24, 14, 32, 1, 123_456, tzinfo=timezone.utc)
     reading = p.step(now=fixed)
-    # Microseconds truncated to ms, 'Z' suffix.
     assert reading["ts"] == "2026-05-24T14:32:01.123Z"
 
 
@@ -108,7 +106,6 @@ def test_healthy_state_initial_degradation_near_zero():
 
 def test_healthy_state_degradation_stays_under_ceiling():
     p = Pump("P-01", seed=42)
-    # Use a huge dwell so we don't auto-leave.
     for _ in range(500):
         p.step()
     assert p.state is PumpState.HEALTHY
@@ -118,10 +115,9 @@ def test_healthy_state_degradation_stays_under_ceiling():
 def test_healthy_telemetry_in_expected_band():
     p = Pump("P-01", seed=42, ambient=22.0, setpoint=1800.0)
     readings = [p.step() for _ in range(50)]
-    # ambient(22) + 0.02*1800 = 58 → bearing ~58 in healthy. Noise σ=0.5.
+    # At d≈0, RPM ≈ setpoint, bearing ≈ ambient + 0.02*1800 = 58.
     avg_bearing = mean(r["bearing_temp"] for r in readings)
     assert 56.0 < avg_bearing < 60.0
-    # vibration baseline 0.3, healthy ceiling adds ≤ 0.05*2.5=0.125. Noise σ=0.05.
     avg_vib = mean(r["vibration_amp"] for r in readings)
     assert 0.2 < avg_vib < 0.6
 
@@ -132,24 +128,17 @@ def test_healthy_telemetry_in_expected_band():
 def test_degrading_state_monotonic_rise_on_average():
     p = Pump("P-01", seed=42)
     p.force_state(PumpState.DEGRADING)
-    # Sample degradation values across many ticks; assert the trend is up.
     samples = []
     for _ in range(100):
         p.step()
         samples.append(p.degradation)
-    # First-quarter mean << last-quarter mean (rate is strictly positive).
     first_q = mean(samples[:25])
     last_q = mean(samples[-25:])
     assert last_q > first_q + 0.05
 
 
 def test_degrading_caps_at_ceiling():
-    p = Pump("P-01", seed=42)
-    p.force_state(PumpState.DEGRADING)
-    # Run long enough to saturate the ceiling.
     ceiling = DEFAULT_PROFILES[PumpState.DEGRADING].ceiling
-    # Auto-advance would kick in at default dwell (200); inject huge dwell
-    # so we observe pure ceiling behavior, not state change.
     p = Pump(
         "P-01",
         seed=42,
@@ -168,16 +157,16 @@ def test_degrading_caps_at_ceiling():
 # -- FAILING state ---------------------------------------------------------
 
 
-def test_failing_telemetry_hotter_than_degrading():
-    """A FAILING pump should produce higher bearing temp and vibration on
-    average than a DEGRADING one with the same RNG seed."""
+def test_failing_has_higher_vibration_than_degrading_at_ceiling():
+    """Per ADR 0002, bearing_temp is no longer monotonic in degradation
+    (RPM drops faster than the +15*d term rises), so vibration is the
+    cleanest 'wear' signal: linear in d, no RPM coupling."""
 
-    def avg_signals(state: PumpState) -> tuple[float, float]:
+    def avg_vibration(state: PumpState) -> float:
         p = Pump(
             "P-01",
             seed=7,
             initial_state=state,
-            # Long dwell so we stay in the chosen state and observe its envelope.
             profiles={
                 state: StateProfile(
                     rate_per_tick=DEFAULT_PROFILES[state].rate_per_tick,
@@ -185,20 +174,39 @@ def test_failing_telemetry_hotter_than_degrading():
                     dwell_ticks=10_000,
                 )
             },
-            # Start each at its ceiling so we compare steady-state envelopes,
-            # not transient ramp-ups.
             initial_degradation=DEFAULT_PROFILES[state].ceiling,
         )
         readings = [p.step() for _ in range(100)]
-        return (
-            mean(r["bearing_temp"] for r in readings),
-            mean(r["vibration_amp"] for r in readings),
-        )
+        return mean(r["vibration_amp"] for r in readings)
 
-    deg_bearing, deg_vib = avg_signals(PumpState.DEGRADING)
-    fail_bearing, fail_vib = avg_signals(PumpState.FAILING)
-    assert fail_bearing > deg_bearing
-    assert fail_vib > deg_vib
+    assert avg_vibration(PumpState.FAILING) > avg_vibration(PumpState.DEGRADING)
+
+
+def test_failing_vibration_rises_faster_than_degrading_from_zero():
+    """Derivative-fairness (Gemini review #4): from-zero rampup proves
+    FAILING accumulates wear faster than DEGRADING. Catches bugs that an
+    at-ceiling comparison can't (e.g. FAILING rate set to 0)."""
+
+    def vibration_after_50_ticks(state: PumpState) -> float:
+        p = Pump(
+            "P-01",
+            seed=7,
+            initial_state=state,
+            initial_degradation=0.0,
+            profiles={
+                state: StateProfile(
+                    rate_per_tick=DEFAULT_PROFILES[state].rate_per_tick,
+                    ceiling=DEFAULT_PROFILES[state].ceiling,
+                    dwell_ticks=10_000,
+                )
+            },
+        )
+        readings = [p.step() for _ in range(50)]
+        return mean(r["vibration_amp"] for r in readings)
+
+    failing_vib = vibration_after_50_ticks(PumpState.FAILING)
+    degrading_vib = vibration_after_50_ticks(PumpState.DEGRADING)
+    assert failing_vib > degrading_vib + 0.05
 
 
 # -- FAILED state ----------------------------------------------------------
@@ -208,25 +216,27 @@ def test_failed_state_pins_degradation_to_one_immediately():
     p = Pump("P-01", seed=0)
     p.force_state(PumpState.FAILED)
     assert p.degradation == 1.0
-    # And stays at 1.0 across many ticks.
     for _ in range(20):
         p.step()
         assert p.degradation == 1.0
 
 
 def test_failed_state_keeps_emitting_telemetry():
-    """FAILED pump should still produce telemetry dicts (design choice (b))."""
+    """Per ADR 0002: FAILED-state envelope is near-zero RPM with high
+    stutter, bearing temp dominated by ambient + degradation term (RPM
+    contribution vanishes), vibration at its maximum."""
     p = Pump("P-01", seed=0, initial_state=PumpState.FAILED)
-    reading = p.step()
-    assert set(reading.keys()) == set(TELEMETRY_KEYS)
-    # And at extreme values — degradation pinned at 1.0 maxes the linear terms.
-    # bearing_temp = 22 + 0.02*1800 + 1.0*15 + noise(σ=0.5) ≈ 73
-    assert reading["bearing_temp"] > 70.0
-    assert reading["vibration_amp"] > 2.0  # 0.3 + 1.0*2.5 = 2.8
+    readings = [p.step() for _ in range(50)]
+    for r in readings:
+        assert set(r.keys()) == set(TELEMETRY_KEYS)
+    assert mean(r["vibration_amp"] for r in readings) > 2.5
+    avg_rpm = mean(r["rpm"] for r in readings)
+    assert abs(avg_rpm) < 50  # σ_mean ≈ 20/√50 ≈ 2.8
+    avg_bearing = mean(r["bearing_temp"] for r in readings)
+    assert 33 < avg_bearing < 42
 
 
 def test_failed_state_does_not_auto_advance():
-    """FAILED is terminal: dwell_ticks is None by default."""
     p = Pump("P-01", seed=0, initial_state=PumpState.FAILED)
     for _ in range(50):
         p.step()
@@ -282,7 +292,6 @@ def test_different_seeds_diverge():
     a = Pump("P-01", seed=1)
     b = Pump("P-01", seed=2)
     fixed = datetime(2026, 5, 24, 0, 0, 0, tzinfo=timezone.utc)
-    # Within 10 ticks we should see at least one differing reading.
     diffs = sum(a.step(now=fixed) != b.step(now=fixed) for _ in range(10))
     assert diffs > 0
 
