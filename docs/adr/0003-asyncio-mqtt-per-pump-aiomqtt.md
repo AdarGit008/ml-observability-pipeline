@@ -1,8 +1,8 @@
 # ADR 0003 — Asyncio + Aiomqtt, Per-Pump Connection, Retry-Forever, Schema-Only TLS Validation
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-05-25
-- **Deciders:** PO (Adar), Claude (architect), Gemini (reviewer — pending)
+- **Deciders:** PO (Adar), Claude (architect), Gemini (reviewer)
 
 ## Context
 
@@ -25,7 +25,7 @@ The simulator runner adopts the following five-part design:
 1. **MQTT library: `aiomqtt`** (>=2.0) on top of `paho-mqtt` (>=2.0). aiomqtt is the asyncio-native wrapper by the same maintainer; we use its `async with Client(...)` / `await client.publish(...)` interface directly.
 2. **Concurrency: single asyncio event loop, one task per pump.** Implemented in `simulator/runner.py::Fleet`. 15 pumps × 0.5 Hz is well under asyncio's comfort zone; process-per-pump is deferred to "if we ever need it" — which we won't at portfolio scale.
 3. **Connection topology: one MQTT connection per pump, in BOTH local and AWS modes.** Each `Pump` is paired with its own `Publisher` (which owns one `aiomqtt.Client`, which owns one TCP socket). `client_id` matches the pump's id (e.g., `P-07`).
-4. **Partial-failure policy: retry-forever, per-pump.** On `PublisherError` (connect refused, dropped, publish failed), the affected per-pump task waits with exponential backoff (1s → 30s ceiling) and reconnects independently. Other pumps are unaffected. Backoff resets to 1s on each successful reconnect so a transient outage doesn't keep the pump in the slow tier afterward.
+4. **Partial-failure policy: retry-forever, per-pump.** On `PublisherError` (connect refused, dropped, publish failed), the affected per-pump task waits with exponential backoff (1s → 30s ceiling) and reconnects independently. Other pumps are unaffected. **Backoff resets on each successful publish, not on each successful connect** — this closes the "publish-denied flapping" hole identified in Gemini Q3 of the 2026-05-25 mqtt-publishing review: a publisher with CONNECT permission but no PUBLISH permission (an AWS IoT policy that allows the former but not the latter) would otherwise loop at 1s forever, never engaging the 30s cap.
 5. **AWS-IoT readiness: shape-only TLS schema validation.** The YAML schema accepts a `broker.tls` block (cert_path, key_path, ca_path) when `target: aws-iot`; `load_config` checks the paths are non-empty strings but does NOT touch disk. `AwsIotPublisher` exists, accepts a `TlsConfig` at construction, and raises `NotImplementedError` from `__aenter__` with a message pointing here. `Fleet.from_config` additionally rejects `target: aws-iot` up front so a misconfigured fleet fails before any pump tries to connect. File-existence and cert-content checks live in the (future) `AwsIotPublisher.__aenter__` body.
 
 ## Alternatives considered
@@ -56,6 +56,8 @@ The simulator runner adopts the following five-part design:
 
 **C. Retry-forever (the decision).** A pump's per-task connect loop keeps trying with exponential backoff; the rest of the fleet is unaffected. PO picked this at session-brief time (Q4). Matches paho's own auto-reconnect philosophy.
 
+**D. Reset backoff on successful CONNECT (rejected during Gemini review).** Initial implementation. Gemini Q3 identified the flapping hole: a publisher that connects but is denied publish would never engage the 30s cap. Replaced by "reset on successful publish" — requires getting one message through before trusting the connection.
+
 ### 5. AWS-IoT TLS validation
 
 **A. Shape-only schema validation, file checks in the publisher (the decision).** Loader is pure schema validation; file existence is checked where the file is about to be opened.
@@ -71,6 +73,7 @@ The simulator runner adopts the following five-part design:
 - **Mode parity preserved.** Same `Publisher` ABC, same per-pump connection topology, same `Fleet` runner across local and AWS targets. The implementation gap is exactly one class (`AwsIotPublisher.__aenter__`).
 - **Per-pump observability.** Mosquitto and CloudWatch both see distinct `client_id`s — log lines for "pump P-07 disconnected" map cleanly to the right physical pump.
 - **Failure isolation.** A flaky pump can't drag the rest of the fleet down. Recruiter-facing demo behavior matches what "production" fleet code should do.
+- **Backoff cap engages correctly under publish-denied scenarios** (per the Gemini-Q3 reset-on-publish refinement).
 - **Loader stays pure.** `load_config` is now back to "validate the YAML shape and return a typed dataclass" — no filesystem, no warnings, no runtime feasibility checks. Tests are simpler and the contract is clearer (`Fleet.from_config` is where runtime-feasibility lives).
 - **Zero AWS spend during the wait.** The mTLS publisher doesn't actually run; we can keep iterating on the rest of the pipeline without provisioning AWS today.
 
@@ -95,6 +98,8 @@ The simulator runner adopts the following five-part design:
 - Session log: `docs/sessions/2026-05-25-simulator-mqtt-publishing.md`.
 - Implementation: `simulator/publisher.py`, `simulator/runner.py`, `simulator/__main__.py`.
 - Schema delta: `simulator/config.py::TlsConfig` + `_validate_broker`, `simulator/config.example.yaml`.
-- Tests: `simulator/tests/test_publisher.py` (21 cases), `simulator/tests/test_runner.py` (24 cases), tls block additions in `simulator/tests/test_config.py`.
+- Tests: `simulator/tests/test_publisher.py` (21 cases), `simulator/tests/test_runner.py` (25 cases incl. backoff sequence + reset-on-publish), tls block additions in `simulator/tests/test_config.py`.
+- Review packet: `review_packets/2026-05-25-simulator-mqtt-publishing.md` — Q3 (reset-on-publish) and Q8 (Windows signal handling) drove changes from Proposed to Accepted.
+- Review response: `review_responses/2026-05-25-simulator-mqtt-publishing.md`.
 - Related ADRs: ADR 0002 (RPM coupling — feeds the telemetry this runner publishes).
 - aiomqtt: https://aiomqtt.readthedocs.io/
