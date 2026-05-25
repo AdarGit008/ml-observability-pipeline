@@ -36,7 +36,7 @@ simulator/publisher.py         +Publisher ABC, LocalPublisher (aiomqtt), AwsIotP
 simulator/runner.py            +Fleet + per-pump asyncio task, retry-forever, shutdown event
 simulator/__main__.py          +argparse entry point, signal handlers
 simulator/__init__.py          +re-exports for new symbols
-simulator/tests/test_config.py +16 tls/warning tests (62 → 78 cases — wait, 47 → 63)
+simulator/tests/test_config.py +16 tls/warning tests
 simulator/tests/test_publisher.py +21 cases (new file)
 simulator/tests/test_runner.py +24 cases (new file)
 requirements.txt               +aiomqtt>=2.0, paho-mqtt>=2.0 (explicit transitive pin)
@@ -74,15 +74,15 @@ Be explicit. Vague packets get vague reviews. Lines below cite `simulator/...` p
 - **AwsIotPublisher implementation depth.** It's a stub; the real implementation is its own session.
 - **Type checker** runs (no mypy in CI yet).
 
-## Resolution (filled in by Claude after Gemini responds)
+## Resolution
 
 | Gemini point | Disposition | Notes |
 |---|---|---|
-| 1. <summarize> | Addressed / Deferred / Rejected | <where, why> |
-| 2. ... | ... | ... |
-| 3. ... | ... | ... |
-| 4. ... | ... | ... |
-| 5. ... | ... | ... |
-| 6. ... | ... | ... |
-| 7. ... | ... | ... |
-| 8. ... | ... | ... |
+| **Q1 — Asyncio bridge correctness.** Confirmed: silencing `MqttError` in `__aexit__` is standard practice; risk noted that `publish()` after a dropped connection raises `MqttError`, which we already translate to `PublisherError`. | **Confirmed — no change** | `simulator/publisher.py::LocalPublisher.__aexit__` already swallows the disconnect-time `MqttError`; `publish()` already wraps it. Test `test_local_publisher_publish_wraps_mqtt_error` covers the post-drop case. |
+| **Q2 — Per-pump connection topology at 15 pumps.** Confirmed: aiomqtt drives paho via non-blocking `loop_read`/`loop_write` hooked into asyncio, not background threads, so 15 connections is 15 standard socket readers, not 15 blocked threads. No starvation expected as long as `Pump.step()` stays cheap (it does — pure math). | **Confirmed — no change** | Recorded the aiomqtt-uses-paho-non-blocking explanation in ADR 0003 §Decision so the next reader doesn't have to re-derive it. |
+| **Q3 — Backoff reset semantics.** Flagged: reset-on-connect opens a flapping vulnerability when CONNECT succeeds but PUBLISH is denied (e.g., AWS IoT policy that allows the former but not the latter). Loop runs at the 1s initial backoff forever, never engaging the 30s cap. | **Addressed (code change)** | `simulator/runner.py::_run_pump` — moved `backoff = INITIAL_BACKOFF_SECONDS` from immediately after `async with publisher:` to immediately after `await publisher.publish(topic, reading)`. Module docstring and ADR 0003 §Decision and §Alternatives 4 updated to reflect "reset on successful publish." New test `test_fleet_backoff_resets_on_successful_publish` (proves the move) + the climb-to-cap test below (proves the cap engages). |
+| **Q4 — Shape-only TLS validation.** Confirmed: separation of concerns is good — loader validates syntax/schema, publisher validates environment (disk/network). Pushing file-existence into the loader would entangle config parsing with deployment state. | **Confirmed — no change** | Decision recorded as-is in ADR 0003 §Decision and §Alternatives 5. |
+| **Q5 — Double-rejection (Fleet + Publisher) for aws-iot.** Confirmed: defense in depth. `Fleet.from_config` protects UX (one fast clear error); `AwsIotPublisher.__aenter__` protects the contract (callers bypassing the factory still hit a loud failure). | **Confirmed — no change** | Rationale already in the `Fleet.from_config` docstring; cross-referenced from ADR 0003. |
+| **Q6 — `NotImplementedError` at fleet-construction vs. `UserWarning` at config-load.** Confirmed: the `NotImplementedError` at `Fleet.from_config` satisfies the original "no silent failures" concern — it's a hard synchronous failure at startup, before the event loop runs. The specific stack frame (load vs. init) doesn't matter. | **Confirmed — no change** | Loader stays pure schema validation. Loader-time "no warning" property is locked in by `test_non_healthy_scenarios_parse_without_warning` and `test_aws_iot_load_emits_no_warning`. |
+| **Q7 — Better testing pattern for the retry loop.** Flagged: asserting connect-attempt counts verifies the loop but ignores the math (exponential climb, 30s cap). Suggested pattern: mock `asyncio.sleep` and assert the exact backoff sequence. | **Addressed (test added)** | Added `test_fleet_backoff_climbs_to_cap_then_holds`. Slightly adapted from Gemini's exact suggestion: the runner uses `asyncio.wait_for(shutdown.wait(), timeout=seconds)` rather than `asyncio.sleep(seconds)` (because we want the shutdown event to interrupt the wait). So I monkeypatched `Fleet._wait_or_shutdown` itself rather than `asyncio.sleep` — same deterministic-no-timing-jitter property, intercepted at our own abstraction boundary. Test asserts `recorded_waits == [1.0, 2.0, 4.0, 8.0, 16.0, 30.0, 30.0]`. Also renamed the old `test_fleet_run_resets_backoff_on_successful_connect` to `test_fleet_run_continues_after_failed_connects` (more honest about what it actually verified) and added the new `test_fleet_backoff_resets_on_successful_publish` (covers the Q3 fix). |
+| **Q8 — Windows signal handling.** Flagged: relying on `KeyboardInterrupt` → `CancelledError` propagation on Windows can leave the MQTT DISCONNECT packet unsent (the loop is being torn down aggressively while `LocalPublisher.__aexit__` is still trying to send DISCONNECT), producing "Task was destroyed but it is pending!" warnings. Suggested: install a sync `signal.signal` handler that uses `loop.call_soon_threadsafe(fleet.request_shutdown)`. | **Addressed (code change)** | `simulator/__main__.py::_install_shutdown_handlers` now tries `loop.add_signal_handler` first (Unix), and on `NotImplementedError`/`RuntimeError` falls back to `signal.signal` + `loop.call_soon_threadsafe` (Windows ProactorEventLoop). This avoids the chaotic cancellation path on Windows. `KeyboardInterrupt` is kept as a paranoia backstop in `main()` for the case where signal-handler install fails entirely (e.g., not on the main thread). |
