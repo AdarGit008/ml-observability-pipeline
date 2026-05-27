@@ -217,3 +217,21 @@ Watch items either way:
 - **aiomqtt API stability.** aiomqtt v2 is what we pinned. A future v3 could move again; pin tight if a fresh `pip install` ever brings in something newer than 2.x.
 - **Onboarding UX is still on the deferred list.** Its own session.
 - **Subscribers don't exist yet.** The published telemetry currently has no consumer. `lambda_scorer` / `local_runtime` sessions will subscribe. Until then the manual `mosquitto_sub` is the only consumer.
+
+## Update 2026-05-27 — smoke test green, two Windows quirks fixed
+
+End-to-end smoke test (`eclipse-mosquitto` in Docker + `python -m simulator` on Windows + `mosquitto_sub` subscriber) was run on 2026-05-27. All 15 pumps connected, JSON telemetry flows at the expected ~0.5 Hz per pump (~7.5 msg/s aggregate), Ctrl+C exits cleanly. Pipeline is fully validated end-to-end.
+
+Two Windows-specific bugs were caught during the smoke test, neither one detectable by the existing unit tests (both monkeypatch `aiomqtt.Client` and never open a real socket):
+
+1. **Mosquitto 2.x `allow_anonymous` placement** — when the directive appears AFTER the `listener` line in a config with `per_listener_settings false` (the default), Mosquitto silently ignores it. TCP connections succeed but MQTT CONNECT packets are rejected with no log line. Fix: put `allow_anonymous true` BEFORE `listener 1883 0.0.0.0` in the broker config. Captured in `.local/mosquitto.conf` (gitignored — see commit 6 below). Not a project code change, just operational knowledge for whoever runs the smoke test next.
+
+2. **Windows event-loop quirk** — Python 3.14 on Windows defaults to `ProactorEventLoop`, which does NOT implement `add_reader`/`add_writer`. paho-mqtt uses those methods to register its socket with asyncio; without them the connect hangs at the OS-level TCP timeout (~30 s) and the broker never sees the attempt. Fix: pass `loop_factory=asyncio.SelectorEventLoop` to `asyncio.run()` on Windows. Real code change in `simulator/__main__.py`. Full diagnosis in [ADR 0003 §Addendum 2026-05-27](../adr/0003-asyncio-mqtt-per-pump-aiomqtt.md#addendum-2026-05-27--windows-event-loop-policy).
+
+Files touched in the 2026-05-27 follow-up:
+
+- `simulator/__main__.py` — `_loop_factory()` + `asyncio.run(..., loop_factory=_loop_factory())`.
+- `docs/adr/0003-asyncio-mqtt-per-pump-aiomqtt.md` — addendum capturing the Windows-loop-factory diagnosis and reflecting on why the unit tests missed it.
+- `.gitignore` — added `.local/` (per-developer scratch for `mosquitto.conf` and ad-hoc probes).
+
+Test suite: still 139 passing (no new tests; the change is only exercised by `asyncio.run()` itself, which the unit tests don't reach). A future "integration smoke" suite running against a real broker would catch the entire bug class — explicitly deferred (see ADR 0003 §Negative consequences).
