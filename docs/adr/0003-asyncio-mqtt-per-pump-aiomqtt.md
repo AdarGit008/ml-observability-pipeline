@@ -82,7 +82,23 @@ The simulator runner adopts the following five-part design:
 - **15 TCP connections to Mosquitto, not 1.** Trivial at 15 pumps but worth knowing if `pump_count` ever stretches toward the schema cap of 100.
 - **aiomqtt is one more dependency** beyond the brief's stated paho-mqtt. We get the protocol stack we'd have written ourselves but with a thicker import-time footprint.
 - **`AwsIotPublisher` is dead code in the main flow** (`Fleet.from_config` rejects `target: aws-iot` up front). The class still exists for direct callers and as a contract anchor, but real coverage of the connect path waits for the AWS-IoT session.
-- **No real-broker tests in `pytest`.** The unit tests monkeypatch `aiomqtt.Client`; manual smoke step with Mosquitto in Docker is the wire-format check. This is a deliberate trade against pulling Docker into the test suite (the FUSE / cache situation in the sandbox makes that worse than usual).
+- **No real-broker tests in `pytest`.** The unit tests monkeypatch `aiomqtt.Client`; manual smoke step with Mosquitto in Docker is the wire-format check. This is a deliberate trade against pulling Docker into the test suite (the FUSE / cache situation in the sandbox makes that worse than usual). The cost of this trade became visible during the 2026-05-27 smoke test (see §"Addendum 2026-05-27") — both Windows-quirk bugs caught there would have been caught by an integration test that opens a real socket.
+
+## Addendum 2026-05-27 — Windows event-loop policy
+
+The first end-to-end smoke test of the simulator on Windows (Python 3.14) exposed a second Windows asyncio quirk beyond the SIGINT handler covered by §"Decision 5" / Gemini-Q8:
+
+**Symptom:** Every per-pump connect timed out with `Operation timed out`; the broker log showed no incoming connections; the paho client emitted `Caught exception in on_socket_unregister_write`.
+
+**Root cause:** Windows defaults to `ProactorEventLoop` (since Python 3.8). `ProactorEventLoop` does NOT implement `loop.add_reader()`/`add_writer()` — they raise `NotImplementedError`. paho-mqtt uses exactly those methods to register its socket with asyncio. Result: the socket never gets registered, paho can't notice the SYN-ACK reply, and the connect hangs until the OS-level TCP timeout fires.
+
+**Fix:** `simulator/__main__.py` now passes `loop_factory=asyncio.SelectorEventLoop` to `asyncio.run()` on Windows. `SelectorEventLoop` supports `add_reader`/`add_writer` and is what paho/aiomqtt were designed against. We don't use the subprocess-async features that `ProactorEventLoop` is better at, so the swap is pure win. On Unix, `loop_factory=None` falls through to the platform default (which is `SelectorEventLoop` already).
+
+**Why `loop_factory` over `set_event_loop_policy`:** the older `asyncio.set_event_loop_policy(WindowsSelectorEventLoopPolicy())` pattern works but emits `DeprecationWarning` on Python 3.12+; both APIs are slated for removal in 3.16. `loop_factory` (added to `asyncio.Runner` and `asyncio.run` in 3.12) is the modern non-deprecated equivalent.
+
+**Why the unit tests didn't catch this:** the monkeypatched `aiomqtt.Client` in `simulator/tests/test_publisher.py` and `test_runner.py` never opens a real socket and never invokes `loop.add_reader`. The only path that exercises the failing code is a live broker connect, which is what the smoke test covers.
+
+**Lessons logged in the session notes:** a future "integration smoke" suite running against a real `eclipse-mosquitto` container would catch issues in this class (Windows-asyncio, paho-aiomqtt version mismatches, mosquitto config quirks like `allow_anonymous` placement). Pulling Docker into `pytest` is still rejected for the reasons in the "No real-broker tests in pytest" bullet above; the smoke test in `docs/sessions/2026-05-25-simulator-mqtt-publishing.md` is the manual stand-in.
 
 **Follow-ups:**
 

@@ -38,6 +38,32 @@ from simulator.config import ConfigError, load_config
 from simulator.runner import Fleet
 
 
+def _loop_factory():
+    """Pick the right event loop class for this platform.
+
+    Windows uses ProactorEventLoop by default (Python 3.8+). paho-mqtt
+    registers its socket via ``loop.add_reader``/``add_writer``, which
+    ``ProactorEventLoop`` does NOT implement (raises ``NotImplementedError``
+    before any bytes are sent — the broker never sees the connection
+    attempt, the publisher reports "Operation timed out").
+    ``SelectorEventLoop`` supports the reader/writer APIs and is what
+    aiomqtt/paho expect. We don't use subprocess-async features that
+    ProactorEventLoop is better at, so the swap is pure win for this project.
+
+    On Unix, ``None`` falls through to the default factory (which is
+    ``SelectorEventLoop`` already).
+
+    NOTE: the older ``asyncio.set_event_loop_policy(WindowsSelectorEventLoopPolicy())``
+    pattern also works but emits ``DeprecationWarning`` on Python 3.12+
+    (both APIs are slated for removal in 3.16). The ``loop_factory``
+    parameter on ``asyncio.run`` is the modern equivalent and is
+    non-deprecated.
+    """
+    if sys.platform == "win32":
+        return asyncio.SelectorEventLoop
+    return None
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="python -m simulator",
@@ -119,7 +145,7 @@ def main(argv: list[str] | None = None) -> int:
         return 3
 
     try:
-        asyncio.run(_run(fleet))
+        asyncio.run(_run(fleet), loop_factory=_loop_factory())
     except KeyboardInterrupt:
         # Paranoia backstop: with the sync signal bridge installed, SIGINT
         # is consumed before Python translates it to KeyboardInterrupt.
