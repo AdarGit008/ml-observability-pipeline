@@ -41,6 +41,11 @@ simulator/config.yaml
 data/
 local_runtime/data/
 
+# Per-developer scratch dir (mosquitto.conf for smoke tests, ad-hoc probe scripts).
+# Convention: anything under .local/ is NEVER required for the project to work —
+# it's host-specific glue (e.g. broker config mounts) for whoever is running it.
+.local/
+
 # Dev quality-of-life (per Gemini review of 2026-05-24-simulator-pump)
 .envrc          # direnv
 .python-version # pyenv
