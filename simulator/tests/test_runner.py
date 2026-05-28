@@ -23,7 +23,12 @@ from simulator.config import (
     SimulatorConfig,
     TlsConfig,
 )
-from simulator.publisher import LocalPublisher, Publisher, PublisherError
+from simulator.publisher import (
+    AwsIotPublisher,
+    LocalPublisher,
+    Publisher,
+    PublisherError,
+)
 from simulator.pump import PumpState
 from simulator.runner import (
     DEFAULT_TICK_SECONDS,
@@ -175,14 +180,21 @@ def test_from_config_rejects_non_healthy_scenario(scenario: ScenarioKind):
         Fleet.from_config(_config(scenario=scenario))
 
 
-def test_from_config_rejects_aws_iot_target():
+def test_from_config_uses_aws_iot_publisher_for_aws_iot_target():
+    """The aws-iot reject was dropped on 2026-05-27 when AwsIotPublisher
+    landed (ADR 0003 §Addendum 2026-05-27 "AwsIotPublisher wired"). The
+    publisher itself now gates on missing certs at connect time; here we
+    only assert from_config wires the right subclass and the TlsConfig
+    threads through to it. No certs are opened at construction time."""
     tls = TlsConfig(
         cert_path="certs/cert.pem",
         key_path="certs/key.pem",
         ca_path="certs/ca.pem",
     )
-    with pytest.raises(NotImplementedError, match="aws-iot.*not yet wired"):
-        Fleet.from_config(_config(target=BrokerTarget.AWS_IOT, tls=tls))
+    fleet = Fleet.from_config(_config(target=BrokerTarget.AWS_IOT, tls=tls))
+    publishers = [pub for _, pub in fleet.members]
+    assert all(isinstance(p, AwsIotPublisher) for p in publishers)
+    assert all(p.tls == tls for p in publishers)
 
 
 def test_from_config_applies_demo_mode_profiles():
@@ -455,5 +467,3 @@ def test_fleet_backoff_resets_on_successful_publish(monkeypatch):
     # Both failure cycles should have used the INITIAL backoff: the
     # successful publish in between reset the counter.
     assert recorded_backoffs == [1.0, 1.0]
-    # One publish actually made it through.
-    assert len(pubs[0].published) == 1

@@ -59,16 +59,21 @@ broker:
 
   # mTLS material — REQUIRED when target is 'aws-iot', FORBIDDEN when
   # target is 'local'. The loader checks the paths are non-empty strings
-  # but does NOT touch disk; AwsIotPublisher does file-existence and cert
-  # parsing at connect time (when it lands — see ADR 0003 for status).
+  # but does NOT touch disk; AwsIotPublisher does file-existence and SSL
+  # context build at connect time (see ADR 0003 §Decision 5 + Addendum
+  # 2026-05-27 "AwsIotPublisher wired").
   #
   # Example shape for an aws-iot manifest (uncomment after switching
-  # target above and provisioning certs via the AWS IoT console):
+  # target above and provisioning Thing+cert+policy via the AWS IoT
+  # Console — see docs/sessions/2026-05-27-simulator-aws-iot-publisher.md
+  # for the Console walkthrough). Conventional layout per
+  # _interfaces.md §2.4 puts per-Thing material under
+  # `simulator/.secrets/<pump_id>/` (gitignored).
   #
   # tls:
-  #   cert_path: "certs/pump-fleet.cert.pem"
-  #   key_path:  "certs/pump-fleet.private.key"
-  #   ca_path:   "certs/AmazonRootCA1.pem"
+  #   cert_path: "simulator/.secrets/P-00/P-00.cert.pem"
+  #   key_path:  "simulator/.secrets/P-00/P-00.private.key"
+  #   ca_path:   "simulator/.secrets/P-00/AmazonRootCA1.pem"
 
 # Compress HEALTHY dwell so a fresh clone exercises the full
 # HEALTHY -> DEGRADING -> FAILING -> FAILED arc in a few minutes. Without
