@@ -12,6 +12,14 @@ single asyncio event loop (per ADR 0003). On ``run()``:
   other 14 pumps. This is the "retry-forever" partial-failure policy
   picked at session-brief time (Q4): a real fleet has pumps going offline
   all the time; a single pump's bad day shouldn't stop the rest.
+- On ``PublisherConfigError`` (subclass — missing cert, malformed PEM,
+  bad URL), the task does NOT retry. It re-raises, ``Fleet.run`` catches
+  the propagation, sets the shutdown event so the other pumps drain
+  their Publisher contexts, then re-raises so ``main()`` exits with a
+  distinct status code. Per Gemini Q3 (2026-05-27 aws-iot-publisher
+  review) + ADR 0003 §Addendum 2026-05-28 "Static config errors halt
+  the fleet": loud-loop-forever on a missing cert just buries the
+  error in the log on a single-PC dev machine.
 
 Backoff is reset on each **successful publish**, not on each successful
 connect. Resetting on connect (the original implementation) opened a
@@ -22,12 +30,13 @@ backoff, never reaching the 30s cap. Resetting on successful publish
 requires actually getting one message through before we trust the
 connection. Per Gemini Q3, 2026-05-25 mqtt-publishing review.
 
-The non-healthy-scenario and aws-iot-not-wired ``NotImplementedError``
-guards live in ``Fleet.from_config`` — caught at the top of the stack so a
-user with a bad config sees a clear message before any pump tries to
-connect. ``Publisher`` subclasses also self-guard (``AwsIotPublisher``
-raises ``NotImplementedError`` from ``__aenter__``), so a direct caller
-that bypasses ``from_config`` still hits a loud failure.
+The non-healthy-scenario guard lives in ``Fleet.from_config`` — caught at
+the top of the stack so a user with a bad config sees a clear message
+before any pump tries to connect. The previous ``broker.target: aws-iot``
+guard was dropped when ``AwsIotPublisher`` was wired (2026-05-27 session)
+— see ADR 0003 §Addendum 2026-05-27 "AwsIotPublisher wired"; the publisher
+itself is now the gate, raising ``PublisherError`` on transient transport
+errors and ``PublisherConfigError`` on static config errors.
 """
 
 from __future__ import annotations
@@ -37,13 +46,13 @@ import logging
 from typing import Optional, Sequence
 
 from simulator.config import (
-    BrokerTarget,
     ScenarioKind,
     SimulatorConfig,
     profiles_for,
 )
 from simulator.publisher import (
     Publisher,
+    PublisherConfigError,
     PublisherError,
     make_publisher,
     topic_for,
@@ -106,8 +115,8 @@ class Fleet:
     ) -> "Fleet":
         """Build a fleet from a validated ``SimulatorConfig``.
 
-        Rejects two cases up front (cleaner UX than letting them surface
-        from inside a per-pump task):
+        Rejects one case up front (cleaner UX than letting it surface from
+        inside a per-pump task):
 
         - ``config.scenario`` other than ``HEALTHY`` -> ``NotImplementedError``.
           This check used to live in ``load_config`` as a ``UserWarning``
@@ -115,11 +124,23 @@ class Fleet:
           2026-05-25 mqtt-publishing session so the loader is pure schema
           validation (per ADR 0003).
 
-        - ``config.broker.target == AWS_IOT`` -> ``NotImplementedError``.
-          The ``AwsIotPublisher`` stub would also refuse to ``__aenter__``,
-          but failing here means the user sees "AWS IoT not yet wired"
-          before any pump even tries to connect. The stub stays as a
-          backstop for callers that bypass ``from_config``.
+        ``config.broker.target == AWS_IOT`` is NOT rejected here — the
+        ``AwsIotPublisher`` (wired 2026-05-27, see ADR 0003 §Addendum
+        2026-05-27 "AwsIotPublisher wired") is the gate. Missing certs or
+        connect failures surface as ``PublisherError`` /
+        ``PublisherConfigError`` and are handled by ``_run_pump`` (transient
+        ones via retry-forever, static ones by halting the fleet).
+
+        Note that publisher *construction* (via ``make_publisher``) can
+        itself raise ``PublisherConfigError`` — e.g., for an unparseable
+        URL — in which case the error propagates up from this method to
+        ``main()`` rather than surfacing inside a per-pump task. The
+        single fail-fast check that Gemini's Q5 suggested (pre-flighting
+        a secrets-dir existence check here) was deliberately skipped:
+        ``PublisherConfigError`` halting the fleet from inside the first
+        per-pump task that hits a missing cert covers the same UX with
+        less code. See `docs/sessions/2026-05-27-simulator-aws-iot-publisher.md`
+        §"Update 2026-05-28 #2" for the reasoning.
         """
         if config.scenario is not ScenarioKind.HEALTHY:
             raise NotImplementedError(
@@ -127,14 +148,6 @@ class Fleet:
                 "scenario runner is not yet implemented; only "
                 f"{ScenarioKind.HEALTHY.value!r} produces behavior today. "
                 "See context/simulator.md for scenario-runner status."
-            )
-        if config.broker.target is BrokerTarget.AWS_IOT:
-            raise NotImplementedError(
-                "broker.target 'aws-iot' is parsed but not yet wired. "
-                "The AWS IoT mTLS publisher lands in a later session, "
-                "after the AWS account is provisioned. See ADR 0003 and "
-                "context/simulator.md for status; set "
-                "`broker.target: local` in your config for the meantime."
             )
         profiles = profiles_for(config)
         members: list[tuple[Pump, Publisher]] = []
@@ -184,10 +197,19 @@ class Fleet:
     async def run(self) -> None:
         """Run all per-pump tasks until shutdown is requested.
 
-        Each task is independent — a failure in one pump's connect/publish
-        loop does not affect the others (retry-forever policy). Returns
-        cleanly once every task has observed shutdown and exited its
-        Publisher context (the disconnect path).
+        Each task is independent for transient errors — a flaky pump
+        cannot drag the rest of the fleet down (retry-forever policy).
+        Static config errors (``PublisherConfigError``) are the
+        exception: any pump raising one halts the entire fleet (per
+        Gemini Q3, ADR 0003 §Addendum 2026-05-28). On halt, the
+        shutdown event is set, other per-pump tasks drain their
+        Publisher contexts within ``DISCONNECT_TIMEOUT_SECONDS``, and
+        the ``PublisherConfigError`` is re-raised so ``main()`` can
+        return a distinct exit code.
+
+        The disconnect-bound from the 2026-05-28 follow-up is
+        load-bearing here: without it, a pump mid-publish when the
+        fleet halts could stall the drain indefinitely.
         """
         shutdown = self._ensure_shutdown()
         tasks = [
@@ -199,11 +221,15 @@ class Fleet:
         ]
         try:
             await asyncio.gather(*tasks)
-        except asyncio.CancelledError:
-            # Outer cancellation (e.g., the runner itself was cancelled
-            # from a signal handler that couldn't use add_signal_handler):
-            # signal shutdown so the per-pump tasks exit their Publisher
-            # contexts cleanly, then drain.
+        except (PublisherConfigError, asyncio.CancelledError):
+            # Two paths into this except:
+            #   1. A per-pump task raised PublisherConfigError -> halt
+            #      the fleet (Gemini Q3 / ADR 0003 §Addendum 2026-05-28).
+            #   2. Outer cancellation from a signal handler that
+            #      couldn't use add_signal_handler.
+            # Both flows: set shutdown so the other per-pump tasks exit
+            # their Publisher contexts cleanly (bounded by
+            # DISCONNECT_TIMEOUT_SECONDS in publisher.py), drain, raise.
             shutdown.set()
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
@@ -228,6 +254,19 @@ class Fleet:
                             self._tick_seconds, shutdown
                         ):
                             return
+            except PublisherConfigError as e:
+                # Static config error — halt the fleet rather than loop.
+                # Logged at ERROR (not WARNING) because the developer
+                # needs to act on this, not wait it out. Re-raise so
+                # Fleet.run's gather() cancels the other pumps and
+                # main() returns a distinct exit code.
+                # Catch ordering matters: PublisherConfigError MUST
+                # come before PublisherError (subclass first).
+                log.error(
+                    "pump %s static config error (halting fleet): %s",
+                    pump.pump_id, e,
+                )
+                raise
             except PublisherError as e:
                 log.warning(
                     "publisher error for %s (will retry in %.1fs): %s",

@@ -23,9 +23,11 @@ from simulator.config import (
     profiles_for,
 )
 from simulator.publisher import (
+    DISCONNECT_TIMEOUT_SECONDS,
     AwsIotPublisher,
     LocalPublisher,
     Publisher,
+    PublisherConfigError,
     PublisherError,
     make_publisher,
     topic_for,
@@ -59,6 +61,8 @@ __all__ = [
     "LocalPublisher",
     "AwsIotPublisher",
     "PublisherError",
+    "PublisherConfigError",
+    "DISCONNECT_TIMEOUT_SECONDS",
     "make_publisher",
     "topic_for",
     # Runner

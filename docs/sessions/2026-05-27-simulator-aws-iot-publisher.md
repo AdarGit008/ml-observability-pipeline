@@ -155,11 +155,19 @@ in the review packet.
 4. Skip the policy attachment on this screen — we'll create + attach it
    in Phase B. Click **Create thing**.
 5. On the **Download certificates and keys** screen, download:
-   - The device certificate (rename to `P-00.cert.pem`).
+   - The device certificate (rename to `P-00.cert.pem` — strip the
+     trailing `.crt` if the Console added it; observed 2026-05-28).
    - The public key (not needed, but download it for completeness).
    - The private key (rename to `P-00.private.key`).
    - **Amazon Root CA 1** — under "Root CA certificates", download
      RSA 2048 bit key, rename to `AmazonRootCA1.pem`.
+   - **Fallback if the Console links to docs instead of serving the CA
+     directly** (UI churn flagged by Gemini Q8 of the 2026-05-27
+     review): `curl` it directly into the secrets folder:
+     ```powershell
+     curl.exe -o simulator/.secrets/P-00/AmazonRootCA1.pem `
+       https://www.amazontrust.com/repository/AmazonRootCA1.pem
+     ```
 6. Save all three under `simulator/.secrets/P-00/`:
    ```
    simulator/.secrets/P-00/P-00.cert.pem
@@ -563,6 +571,213 @@ state machine with monkeypatched os._exit.
 
 Session log: docs/sessions/2026-05-27-simulator-aws-iot-publisher.md
 section 'Update 2026-05-28'.
+"@
+git commit -m $msg
+```
+ceful Fleet shutdown. Second call:
+   force_exit(130) - POSIX SIGINT convention. Operator UX matches
+   uvicorn/aiohttp.
+
+Tests: +8 (160 total, was 152). test_publisher_shutdown.py: 3 tests
+with a HangingAiomqttClient. test_main.py: 5 tests on _ShutdownState
+state machine with monkeypatched os._exit.
+
+Session log: docs/sessions/2026-05-27-simulator-aws-iot-publisher.md
+section 'Update 2026-05-28'.
+"@
+git commit -m $msg
+```
+
+## Update 2026-05-28 #2 — Gemini review resolutions
+
+Gemini ran on the consolidated review packet
+(`review_packets/2026-05-27-simulator-aws-iot-publisher.md`) covering
+both the (A) AwsIotPublisher wiring and the (B) disconnect-bound +
+Ctrl+C escalation. Full response in
+`review_responses/2026-05-27-simulator-aws-iot-publisher.md`. Of the
+13 questions, 9 came back as "you got it right" confirmations and 4
+recommended changes. Three of the four were accepted as-is; one (Q5)
+was declined with reasoning. Resolution table at the bottom of the
+review packet was filled in alongside this update.
+
+**Accepted changes (Q2, Q3, Q8):**
+
+- **(Q2) Added `ValueError` to the SSL exception tuple in
+  `AwsIotPublisher.__aenter__`.** Encrypted PKCS#8 keys without
+  passwords (and a couple of other malformed-PEM cases) bubble up as
+  `ValueError`, not `ssl.SSLError`. Without catching it, the runner
+  would crash with an unhandled exception instead of producing a clean
+  `PublisherConfigError` (see Q3). One-line fix to the existing
+  `except (ssl.SSLError, OSError)` tuple. Test in
+  `test_publisher_config_error.py::test_aws_iot_value_error_raises_config_error`.
+
+- **(Q3) Introduced `PublisherConfigError(PublisherError)` and the
+  halt-the-fleet behavior.** The meat of this update. Subclass of
+  `PublisherError` so generic `except PublisherError` sites still work;
+  the runner inspects the specific type to decide between retry-forever
+  (transient) and halt-the-fleet (static config). Promoted three raise
+  sites: missing-file checks in `AwsIotPublisher.__aenter__`, SSL/OS/
+  ValueError on cert load, `_parse_mqtt_url` on bad URL. `MqttError`
+  on connect/publish stays as plain `PublisherError` (truly transient).
+  Runner: `_run_pump` catches `PublisherConfigError` before
+  `PublisherError` (subclass-first ordering), logs at ERROR, re-raises.
+  `Fleet.run` catches it alongside `CancelledError` in the
+  `asyncio.gather` wrapper, sets shutdown, drains via
+  `return_exceptions=True`, re-raises. `main()` catches at two layers
+  (Fleet.from_config for URL-parse failure at construction; asyncio.run
+  for cert failure from per-pump task), returns new exit code 4
+  (`PUBLISHER_CONFIG_ERROR_CODE`). New ADR 0003 §Addendum 2026-05-28
+  "Static config errors halt the fleet" carving out the exception
+  from §Decision 4 retry-forever. Test coverage: 11 new in
+  `test_publisher_config_error.py`, 3 new in `test_runner_config_error.py`,
+  5 new in `test_main.py` (one skipped on Python < 3.12 because
+  `asyncio.run(loop_factory=...)` is 3.12+).
+
+- **(Q8) Added `curl` fallback to Phase A of the smoke runbook.** The
+  AWS Console sometimes links to docs instead of serving the AmazonRootCA1
+  cert directly. Inline `curl.exe -o simulator/.secrets/P-00/AmazonRootCA1.pem
+  https://www.amazontrust.com/repository/AmazonRootCA1.pem` added so the
+  next PO running this won't get stuck.
+
+**Declined (Q5):** Gemini suggested a "pre-flight check" in
+`Fleet.from_config` that the base secrets directory exists, to avoid
+15 parallel stack traces for one missing folder. Declined because
+`PublisherConfigError` halting from the first per-pump task that
+hits the missing cert covers the same UX with less code — there's a
+theoretical sub-second window where multiple pumps could log the
+same error before the halt propagates, but in practice the halt is
+fast. Documented in the `Fleet.from_config` docstring + ADR 0003
+§Addendum so a future session reconsidering this has the context.
+
+**Confirmations (no code change):** Q1 (SSLContext defaults — don't
+pin TLS 1.2), Q4 (monkeypatched cert tests are fine — adding
+`cryptography` would be testing the stdlib), Q6 (defer QoS knob,
+proposed shape is right), Q7 (Rule of Three on LocalPublisher
+refactor — wait for 3rd publisher), Q9 (3.0s timeout is fine, no YAML
+knob), Q10 (accept half-open socket window; AWS IoT keepalive sweeps
+in 60s), Q11 (`os._exit(130)` is the right choice; `sys.exit` /
+re-raised `KeyboardInterrupt` both have known footguns in asyncio
+signal handlers), Q12 (`_ShutdownState` class is pragmatic, not over-OO),
+Q13 (mode parity for the disconnect bound is correct — prevents
+future "only hangs on AWS" bug class).
+
+**Test count:** 160 → **179** (+19). One skipped on Python 3.10 (the
+`asyncio.run(loop_factory=...)` end-to-end main() test). On Adar's
+3.12+ Windows, all 179 should pass.
+
+**Files changed in this update:**
+
+- `simulator/publisher.py` — `PublisherConfigError` class, promoted
+  raises, added `ValueError` to SSL exception tuple, updated module
+  docstring with the two exception classes' contract.
+- `simulator/runner.py` — split `_run_pump`'s except into
+  config-error-first + transient-second, `Fleet.run` catches
+  `PublisherConfigError` alongside `CancelledError`, updated module +
+  `Fleet.run` + `Fleet.from_config` docstrings.
+- `simulator/__main__.py` — imported `PublisherConfigError`, added
+  `PUBLISHER_CONFIG_ERROR_CODE = 4` constant, two new except clauses
+  in `main()`, updated module docstring with the exit-code table.
+- `simulator/__init__.py` — re-exported `PublisherConfigError` and
+  `DISCONNECT_TIMEOUT_SECONDS`.
+- `simulator/tests/test_publisher_config_error.py` — NEW (11 tests
+  for the subclass relationship, missing-file raises, SSL/OS/ValueError
+  wrapping, MqttError-stays-transient regression, bad-URL at
+  construction).
+- `simulator/tests/test_runner_config_error.py` — NEW (3 tests:
+  fleet halts on config error from single pump, fleet drains other
+  pumps when one halts with config error proving the (B) disconnect
+  bound is load-bearing during drain, plain `PublisherError` still
+  retries regression test).
+- `simulator/tests/test_main.py` — added `sys` import, added
+  `_REQUIRES_LOOP_FACTORY` skipif marker, added 5 new exit-code tests
+  (one marked skip on 3.10).
+- `docs/adr/0003-asyncio-mqtt-per-pump-aiomqtt.md` — new Addendum
+  2026-05-28 "Static config errors halt the fleet".
+- `docs/sessions/2026-05-27-simulator-aws-iot-publisher.md` — this
+  Update #2 section + Phase A curl-fallback inline edit.
+- `review_packets/2026-05-27-simulator-aws-iot-publisher.md` —
+  Resolution table filled in for all 13 questions.
+
+**Trade-offs:**
+
+- **`PublisherConfigError` is a runtime carve-out from a Decision that
+  ADR 0003 explicitly documented as "retry forever".** Worth being
+  honest about: the original retry-forever decision was made for
+  *transport* failures, not *configuration* failures. The carve-out
+  is consistent with that intent, but the original ADR text said
+  "retry forever" without that qualification. Addendum 2026-05-28
+  makes the distinction explicit so a future reader doesn't read
+  Decision 4 alone and infer "everything is retried".
+
+- **`Fleet.run` re-raises out of `asyncio.gather`.** This is the first
+  exception that's expected to propagate out of the runner in the
+  project's history (CancelledError doesn't count — it's a control
+  flow signal). `main()` had to grow two new except clauses to catch
+  it at both possible surface points. Surface area expansion is small
+  but documented in `__main__.py`'s module docstring exit-code table.
+
+- **Test count grew 12%** (160 → 179). Mostly mechanical (one per
+  raise site + one per exit-code path), but bears watching: at some
+  point the per-error-class test multiplication starts costing more
+  than it pays. We're not there yet.
+
+- **Q5 redundancy debate.** Reasonable people could disagree on
+  whether the pre-flight check is worth ~5 lines for the cleaner
+  "one error log instead of N" UX. Document the reasoning so it's a
+  one-step revisit if the multi-error log spam ever becomes a real
+  pain point.
+
+**Commit to run (PO-side, separate from the 2026-05-28 batch):**
+
+```powershell
+cd "D:\Claude\ML Observability Pipeline"
+
+git add simulator/publisher.py simulator/runner.py simulator/__main__.py simulator/__init__.py `
+        simulator/tests/test_publisher_config_error.py `
+        simulator/tests/test_runner_config_error.py `
+        simulator/tests/test_main.py `
+        docs/adr/0003-asyncio-mqtt-per-pump-aiomqtt.md `
+        docs/sessions/2026-05-27-simulator-aws-iot-publisher.md `
+        review_packets/2026-05-27-simulator-aws-iot-publisher.md `
+        review_responses/2026-05-27-simulator-aws-iot-publisher.md
+
+$msg = @"
+simulator: address Gemini review (PublisherConfigError halts fleet, ValueError catch)
+
+Three accepted changes from the Gemini review of the 2026-05-27 +
+2026-05-28 aws-iot-publisher work:
+
+- Q2: added ValueError to AwsIotPublisher's SSL exception tuple.
+  Encrypted PKCS#8 keys without passwords (and a few other malformed-
+  PEM cases) raise ValueError, not ssl.SSLError. Without the catch
+  the runner would crash with an unhandled exception.
+
+- Q3: introduced PublisherConfigError(PublisherError) for static
+  config errors (missing cert, malformed PEM, bad URL). Runner halts
+  the fleet on the subclass (vs retry-forever on the parent). main()
+  catches it and returns new exit code 4 (PUBLISHER_CONFIG_ERROR_CODE)
+  distinct from 2 (load_config ConfigError) and 3 (runner
+  NotImplementedError). New ADR 0003 Addendum 2026-05-28 'Static
+  config errors halt the fleet' carves this out from Decision 4
+  retry-forever. The 2026-05-28 disconnect-bound from the prior
+  commit is load-bearing here: it bounds the drain when the halting
+  pump's exception cancels the others mid-publish.
+
+- Q8: added a curl fallback to Phase A of the smoke runbook for the
+  AmazonRootCA1.pem download; the Console sometimes links to docs
+  instead of serving the cert directly.
+
+Q5 (Gemini's fleet-level pre-flight check) declined as redundant with
+Q3's halt-on-first-failure. Documented in Fleet.from_config docstring
+and in ADR 0003 Addendum so a future session reconsidering this has
+the context.
+
+Tests: 160 -> 179 (+19, +14 from Q3 work and +5 from main() exit-code
+tests). One skipped on Python 3.10 (the asyncio.run(loop_factory=...)
+test; Adar runs 3.12+ on Windows where it passes).
+
+Resolution table filled in:
+review_packets/2026-05-27-simulator-aws-iot-publisher.md
 "@
 git commit -m $msg
 ```

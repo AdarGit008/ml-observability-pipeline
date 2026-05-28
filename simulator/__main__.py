@@ -34,6 +34,19 @@ instance because the first one looked like it was being ignored — the
 ``_ShutdownState`` machine escalates to ``os._exit(130)`` immediately.
 The 130 exit code is the POSIX convention for "killed by SIGINT". This
 matches the operator UX of ``uvicorn`` / ``aiohttp``.
+
+**Exit codes:**
+
+- ``0`` — normal exit (graceful shutdown via signal or end of work).
+- ``2`` — YAML/schema config error from ``load_config``.
+- ``3`` — runner refused to construct fleet (non-healthy scenario).
+- ``4`` — publisher static config error (``PublisherConfigError`` —
+  missing cert, malformed PEM, bad URL). Distinct from 2 so CI can tell
+  "YAML is malformed" from "YAML is valid but cert is missing". Added
+  2026-05-28 per Gemini Q3 (2026-05-27 aws-iot-publisher review) and
+  ADR 0003 §Addendum 2026-05-28 "Static config errors halt the fleet".
+- ``130`` — forced exit on second Ctrl+C (POSIX SIGINT convention,
+  128+2). Emitted by ``_ShutdownState.__call__`` via ``os._exit``.
 """
 
 from __future__ import annotations
@@ -47,6 +60,7 @@ import sys
 from pathlib import Path
 
 from simulator.config import ConfigError, load_config
+from simulator.publisher import PublisherConfigError
 from simulator.runner import Fleet
 
 
@@ -57,6 +71,12 @@ log = logging.getLogger(__name__)
 # "process terminated by SIGINT" (128 + signal number 2). Documented
 # separately so tests can assert against the same constant.
 FORCE_EXIT_CODE: int = 130
+
+# Exit code when a publisher raises PublisherConfigError (missing cert,
+# malformed PEM, bad URL). Distinct from 2 (YAML/schema error from
+# load_config) and 3 (runner NotImplementedError) so CI can distinguish
+# the failure modes. Added 2026-05-28 per Gemini Q3.
+PUBLISHER_CONFIG_ERROR_CODE: int = 4
 
 
 def _loop_factory():
@@ -204,11 +224,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"config error: {e}", file=sys.stderr)
         return 2
 
+    # Fleet.from_config can also raise PublisherConfigError indirectly
+    # via make_publisher() -> Publisher.__init__ -> _parse_mqtt_url for
+    # an unparseable URL. Catch both NotImplementedError (non-healthy
+    # scenario) and PublisherConfigError (bad URL at construction).
     try:
         fleet = Fleet.from_config(config)
     except NotImplementedError as e:
         print(f"runner error: {e}", file=sys.stderr)
         return 3
+    except PublisherConfigError as e:
+        print(f"publisher config error: {e}", file=sys.stderr)
+        return PUBLISHER_CONFIG_ERROR_CODE
 
     try:
         asyncio.run(_run(fleet), loop_factory=_loop_factory())
@@ -219,6 +246,15 @@ def main(argv: list[str] | None = None) -> int:
         # entirely (e.g., running on a non-main thread). The Fleet.run
         # CancelledError path still handles the cleanup.
         pass
+    except PublisherConfigError as e:
+        # Propagated up from a per-pump task that hit a static cert error
+        # at __aenter__ time. Fleet.run drained the other pumps via the
+        # disconnect-bound wait_for ceiling, then re-raised. We exit with
+        # the distinct code so CI / ops can distinguish "your YAML is
+        # malformed" (exit 2) from "your YAML is valid but the cert is
+        # missing on disk" (exit 4). Added 2026-05-28 per Gemini Q3.
+        print(f"publisher config error: {e}", file=sys.stderr)
+        return PUBLISHER_CONFIG_ERROR_CODE
     return 0
 
 

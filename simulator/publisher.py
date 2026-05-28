@@ -12,9 +12,20 @@ Usage pattern (driven by ``simulator.runner.Fleet``):
         ...                               # more publishes per tick
     # disconnects on context exit (incl. via exception or cancellation)
 
-Exceptions from the underlying transport are translated to
-``PublisherError`` so the runner doesn't need to import aiomqtt or paho.
-The runner uses this to implement connect-with-backoff (ADR 0003).
+Two exception classes carry transport errors back to the runner so the
+runner doesn't import aiomqtt/paho/ssl directly:
+
+- ``PublisherError`` — transient transport failure (connect refused,
+  dropped mid-publish, broker timing out). The runner's retry-forever
+  loop catches and reconnects with backoff (ADR 0003 §Decision 4).
+- ``PublisherConfigError`` (subclass) — static configuration error
+  (missing cert file, malformed PEM, key/cert mismatch, unparseable
+  URL). The runner halts the fleet on this rather than looping — per
+  Gemini Q3 review (2026-05-27 aws-iot-publisher) and ADR 0003
+  §Addendum 2026-05-28 "Static config errors halt the fleet". Reason:
+  loud-loop-forever on a missing cert just buries the error in the
+  log; on a single-PC dev machine the developer wants an immediate
+  crash so they can fix their YAML.
 
 Concurrency note: each pump gets its own ``Publisher`` and its own MQTT
 connection (per the 2026-05-25 mqtt-publishing session brief — Q2 picked
@@ -27,11 +38,7 @@ inner ``aiomqtt.Client.__aexit__`` in ``asyncio.wait_for`` with a
 ``DISCONNECT_TIMEOUT_SECONDS`` ceiling. Without this, the 2026-05-28
 follow-up to the AwsIotPublisher smoke test showed that a TLS
 close_notify handshake (or paho's keepalive flush) could block the
-exit indefinitely — Ctrl+C set the shutdown event, the per-pump task
-exited its inner loop, but the publisher's __aexit__ hung waiting on
-the broker. The wait_for bound is the cheap fix; the runner-level
-"second Ctrl+C escalates to os._exit(130)" in __main__.py is the
-operator-level safety net.
+exit indefinitely.
 """
 
 from __future__ import annotations
@@ -62,11 +69,32 @@ DISCONNECT_TIMEOUT_SECONDS: float = 3.0
 
 
 class PublisherError(Exception):
-    """Wraps any transport-level error from the underlying MQTT client.
+    """Wraps any transient transport-level error from the underlying MQTT
+    client. The runner's retry-forever loop catches this and reconnects
+    with backoff (ADR 0003 §Decision 4).
 
-    Defined here so ``simulator.runner.Fleet`` can catch a single exception
-    type without importing aiomqtt. The original exception is chained via
-    ``__cause__`` so debuggers and tracebacks see the full picture.
+    Defined here so ``simulator.runner.Fleet`` can catch a single
+    exception type without importing aiomqtt. The original exception is
+    chained via ``__cause__`` so debuggers and tracebacks see the full
+    picture.
+    """
+
+
+class PublisherConfigError(PublisherError):
+    """Static configuration error — missing cert file, malformed PEM,
+    key/cert mismatch, unparseable URL. Subclass of ``PublisherError``
+    so generic catch sites still work; the runner inspects the specific
+    type to decide between retry-forever and halt-the-fleet.
+
+    Per Gemini Q3 (2026-05-27 aws-iot-publisher review) and ADR 0003
+    §Addendum 2026-05-28 "Static config errors halt the fleet": looping
+    forever on a missing cert is the wrong UX on a single-PC dev
+    machine — the developer wants an immediate crash so they can fix
+    the YAML or file paths, not a 30-second polling loop that buries
+    the error.
+
+    Catch ordering matters: ``except PublisherConfigError`` must come
+    BEFORE ``except PublisherError`` (Python catches in source order).
     """
 
 
@@ -195,12 +223,12 @@ class AwsIotPublisher(Publisher):
 
     - **TLS material is loaded at connect time.** ``__aenter__`` checks
       that ``tls.cert_path`` / ``tls.key_path`` / ``tls.ca_path`` all
-      resolve to existing files (clean ``PublisherError`` if any is
-      missing) before building an ``ssl.SSLContext`` and handing it to
-      ``aiomqtt.Client(tls_context=...)``. Per ADR 0003 Decision 5, the
-      loader does shape-only validation of the paths; the file-existence
-      and cert-parsing checks live here, where the file is actually
-      opened.
+      resolve to existing files (clean ``PublisherConfigError`` if any
+      is missing) before building an ``ssl.SSLContext`` and handing it
+      to ``aiomqtt.Client(tls_context=...)``. Per ADR 0003 Decision 5,
+      the loader does shape-only validation of the paths; the
+      file-existence and cert-parsing checks live here, where the file
+      is actually opened.
     - **Default port is 8883.** AWS IoT Core's mTLS endpoint listens on
       8883; the ``:443`` ALPN-with-``x-amzn-mqtt-ca`` fallback is for
       networks that block 8883, which the project's home-network setup
@@ -208,13 +236,14 @@ class AwsIotPublisher(Publisher):
       (``mqtts://endpoint:8883`` or bare hostname both work).
 
     Cert parsing failures (malformed PEM, key/cert mismatch, expired
-    CA, etc.) surface from ``ssl.SSLContext.load_*`` as ``ssl.SSLError`` /
-    ``OSError`` and get translated to ``PublisherError`` with a message
-    pointing at the file that failed — the runner's retry-forever loop
-    treats it the same as a transient connect error, which is the wrong
-    answer for "your cert is malformed" but the right answer for "the
-    cert file is being rewritten right now during a rotation." The PO
-    sees the error in the log either way.
+    CA, encrypted PKCS#8 key without password, etc.) surface from
+    ``ssl.SSLContext.load_*`` as ``ssl.SSLError`` / ``OSError`` /
+    ``ValueError`` (per Gemini Q2 — ``ValueError`` was missing from the
+    initial 2026-05-27 implementation) and get translated to
+    ``PublisherConfigError`` with a message pointing at the file that
+    failed. The runner halts on ``PublisherConfigError`` (vs.
+    retry-forever on transient ``PublisherError``), so a malformed cert
+    produces one clean stack trace rather than 30-second-cap polling.
     """
 
     DEFAULT_PORT = 8883  # AWS IoT Core mTLS endpoint
@@ -251,13 +280,15 @@ class AwsIotPublisher(Publisher):
     async def __aenter__(self) -> "AwsIotPublisher":
         # Existence checks first — clearer error than "FileNotFoundError
         # inside ssl.SSLContext.load_*" with no field name attached.
+        # Missing file is a static config error; raise the subclass so
+        # the runner halts the fleet rather than looping forever.
         for field, path_str in (
             ("cert_path", self._tls.cert_path),
             ("key_path", self._tls.key_path),
             ("ca_path", self._tls.ca_path),
         ):
             if not Path(path_str).is_file():
-                raise PublisherError(
+                raise PublisherConfigError(
                     f"AWS IoT mTLS {field} not found: {path_str!r} "
                     f"(check broker.tls in your config; the loader does not "
                     f"check existence — see ADR 0003 Decision 5)"
@@ -265,10 +296,13 @@ class AwsIotPublisher(Publisher):
 
         # Build an SSLContext that validates the AWS IoT server cert
         # against the Amazon Root CA and presents the per-Thing client
-        # cert for mTLS. ssl errors (malformed PEM, key/cert mismatch)
-        # surface as ssl.SSLError; FileNotFoundError shouldn't fire here
-        # because we just checked above, but a race (cert rotated mid-
-        # __aenter__) could still hit OSError — wrap both.
+        # cert for mTLS. Failure modes:
+        # - ssl.SSLError: malformed PEM, key/cert mismatch, expired CA
+        # - OSError: race condition (cert rotated mid-__aenter__, file
+        #   removed between is_file() and create_default_context opening it)
+        # - ValueError: encrypted PKCS#8 key without a password, or an
+        #   unsupported key type (per Gemini Q2; added 2026-05-28)
+        # All three are static config errors → PublisherConfigError.
         try:
             tls_context = ssl.create_default_context(
                 purpose=ssl.Purpose.SERVER_AUTH,
@@ -278,8 +312,8 @@ class AwsIotPublisher(Publisher):
                 certfile=self._tls.cert_path,
                 keyfile=self._tls.key_path,
             )
-        except (ssl.SSLError, OSError) as e:
-            raise PublisherError(
+        except (ssl.SSLError, OSError, ValueError) as e:
+            raise PublisherConfigError(
                 f"failed to build TLS context for {self._client_id!r} "
                 f"(cert={self._tls.cert_path!r}, key={self._tls.key_path!r}, "
                 f"ca={self._tls.ca_path!r}): {e}"
@@ -295,6 +329,10 @@ class AwsIotPublisher(Publisher):
             await self._client.__aenter__()
         except aiomqtt.MqttError as e:
             self._client = None
+            # Transport-level connect failure (CONNREFUSED, network down,
+            # broker rejecting the policy). This IS transient — the
+            # broker might come back, the policy might get fixed, the
+            # network might recover. Stay in retry-forever, do not halt.
             raise PublisherError(
                 f"failed to connect to AWS IoT Core at {self._host}:{self._port} "
                 f"as {self._client_id!r}: {e}"
@@ -382,10 +420,18 @@ def _parse_mqtt_url(url: str, default_port: int) -> tuple[str, int]:
     leniently (``mqtt``, ``mqtts``, ``tcp``, or bare ``host[:port]``)
     since the choice of TLS is governed by the target field, not the
     scheme.
+
+    A URL that doesn't yield a parseable host is a static config error
+    (the YAML field is wrong); raise ``PublisherConfigError`` so the
+    runner halts. This is also called from publisher constructors, so a
+    bad URL surfaces from ``Fleet.from_config`` at startup rather than
+    inside a per-pump task.
     """
     parsed = urlparse(url if "://" in url else f"mqtt://{url}")
     host = parsed.hostname
     if not host:
-        raise PublisherError(f"could not parse host from MQTT url: {url!r}")
+        raise PublisherConfigError(
+            f"could not parse host from MQTT url: {url!r}"
+        )
     port = parsed.port if parsed.port is not None else default_port
     return host, port
