@@ -23,6 +23,17 @@ mqtt-publishing review):
    loop teardown chain that Windows previously fell back to, which could
    leave the MQTT DISCONNECT packet unsent and surface as
    "Task was destroyed but it is pending!" warnings.
+
+**2026-05-28 follow-up — second-Ctrl+C escalation.** The first signal
+asks Fleet for a graceful shutdown (sets the shutdown event; per-pump
+tasks finish their tick and exit their Publisher contexts). The
+publishers' own ``__aexit__`` is now timeout-bounded
+(``DISCONNECT_TIMEOUT_SECONDS = 3 s``), so a stuck TLS teardown can't
+pin shutdown indefinitely. But if the user does Ctrl+C *again* — for
+instance because the first one looked like it was being ignored — the
+``_ShutdownState`` machine escalates to ``os._exit(130)`` immediately.
+The 130 exit code is the POSIX convention for "killed by SIGINT". This
+matches the operator UX of ``uvicorn`` / ``aiohttp``.
 """
 
 from __future__ import annotations
@@ -30,12 +41,22 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import signal
 import sys
 from pathlib import Path
 
 from simulator.config import ConfigError, load_config
 from simulator.runner import Fleet
+
+
+log = logging.getLogger(__name__)
+
+
+# Exit code on second-Ctrl+C escalation. 130 is the POSIX convention for
+# "process terminated by SIGINT" (128 + signal number 2). Documented
+# separately so tests can assert against the same constant.
+FORCE_EXIT_CODE: int = 130
 
 
 def _loop_factory():
@@ -84,20 +105,64 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+class _ShutdownState:
+    """Single-flight shutdown request with second-signal escalation.
+
+    First call: log a heads-up, ask ``Fleet`` to wind down gracefully.
+    Second call: log a forcing warning and exit the process immediately
+    via ``force_exit(130)``. ``force_exit`` is parameterised so tests can
+    monkeypatch ``os._exit``.
+
+    Designed to be called from either an asyncio-native signal handler
+    (``loop.add_signal_handler``) or a sync signal handler bridged via
+    ``loop.call_soon_threadsafe`` — both paths invoke the instance the
+    same way (``self()`` with no args).
+    """
+
+    def __init__(self, fleet: Fleet, force_exit=os._exit) -> None:
+        self._fleet = fleet
+        self._requested = False
+        self._force_exit = force_exit
+
+    @property
+    def requested(self) -> bool:
+        return self._requested
+
+    def __call__(self) -> None:
+        if self._requested:
+            log.warning(
+                "second shutdown signal received; forcing exit (%d). "
+                "If a publisher disconnect hung, the OS will reap the socket.",
+                FORCE_EXIT_CODE,
+            )
+            self._force_exit(FORCE_EXIT_CODE)
+            return  # only reached if force_exit was mocked
+        self._requested = True
+        log.info(
+            "shutdown requested; pumps will finish their current tick and "
+            "disconnect. Ctrl+C again to force immediate exit."
+        )
+        self._fleet.request_shutdown()
+
+
 def _install_shutdown_handlers(
     loop: asyncio.AbstractEventLoop, fleet: Fleet
-) -> None:
-    """Wire SIGINT and SIGTERM to ``fleet.request_shutdown``.
+) -> _ShutdownState:
+    """Wire SIGINT and SIGTERM to a single ``_ShutdownState`` instance.
 
     Tries the asyncio-native API first; falls back to a sync ``signal``
     handler that hops into the loop via ``call_soon_threadsafe`` (this
     works on Windows ProactorEventLoop, where ``add_signal_handler``
     raises ``NotImplementedError``).
+
+    Returns the state machine so callers/tests can introspect whether a
+    shutdown has been requested.
     """
+    state = _ShutdownState(fleet)
     try:
-        loop.add_signal_handler(signal.SIGINT, fleet.request_shutdown)
-        loop.add_signal_handler(signal.SIGTERM, fleet.request_shutdown)
-        return
+        loop.add_signal_handler(signal.SIGINT, state)
+        loop.add_signal_handler(signal.SIGTERM, state)
+        return state
     except (NotImplementedError, RuntimeError):
         # Asyncio-native handlers unavailable (Windows ProactorEventLoop,
         # or we're not on the main thread). Fall through to signal.signal.
@@ -105,7 +170,7 @@ def _install_shutdown_handlers(
 
     def _bridge(signum, frame):  # noqa: ARG001 — signal API shape
         try:
-            loop.call_soon_threadsafe(fleet.request_shutdown)
+            loop.call_soon_threadsafe(state)
         except RuntimeError:
             # Loop already closed mid-shutdown; nothing more to do.
             pass
@@ -118,6 +183,7 @@ def _install_shutdown_handlers(
         signal.signal(signal.SIGTERM, _bridge)
     except (ValueError, AttributeError, OSError):
         pass
+    return state
 
 
 async def _run(fleet: Fleet) -> None:

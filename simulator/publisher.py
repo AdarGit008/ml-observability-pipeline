@@ -21,18 +21,44 @@ connection (per the 2026-05-25 mqtt-publishing session brief — Q2 picked
 "per-pump in both modes"). 15 connections to local Mosquitto is well
 within its capacity, and the topology matches AWS IoT's "one Thing per
 pump = one client_id" model for mode parity.
+
+Disconnect timeout: ``__aexit__`` in both implementations wraps the
+inner ``aiomqtt.Client.__aexit__`` in ``asyncio.wait_for`` with a
+``DISCONNECT_TIMEOUT_SECONDS`` ceiling. Without this, the 2026-05-28
+follow-up to the AwsIotPublisher smoke test showed that a TLS
+close_notify handshake (or paho's keepalive flush) could block the
+exit indefinitely — Ctrl+C set the shutdown event, the per-pump task
+exited its inner loop, but the publisher's __aexit__ hung waiting on
+the broker. The wait_for bound is the cheap fix; the runner-level
+"second Ctrl+C escalates to os._exit(130)" in __main__.py is the
+operator-level safety net.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
+import ssl
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
 
 import aiomqtt
 
 from simulator.config import BrokerTarget, TlsConfig
+
+
+log = logging.getLogger(__name__)
+
+
+# Upper bound on the time ``__aexit__`` will wait on the inner client's
+# disconnect path before logging "forced" and returning. 3 s is generous
+# for both Mosquitto (sub-millisecond LAN) and AWS IoT Core (typical
+# DISCONNECT round-trip is <500 ms over the public internet) while still
+# bounding a hung TLS teardown. Monkeypatchable in tests.
+DISCONNECT_TIMEOUT_SECONDS: float = 3.0
 
 
 class PublisherError(Exception):
@@ -127,7 +153,15 @@ class LocalPublisher(Publisher):
         # leave a half-closed client lingering on the instance.
         self._client = None
         try:
-            await client.__aexit__(exc_type, exc, tb)
+            await asyncio.wait_for(
+                client.__aexit__(exc_type, exc, tb),
+                timeout=DISCONNECT_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            log.warning(
+                "MQTT disconnect for %s timed out after %.1fs; forcing",
+                self._client_id, DISCONNECT_TIMEOUT_SECONDS,
+            )
         except aiomqtt.MqttError:
             # Disconnect path: we're already on the way out; swallowing the
             # transport error here matches paho's own quiet-on-disconnect
@@ -153,29 +187,58 @@ class LocalPublisher(Publisher):
 
 
 class AwsIotPublisher(Publisher):
-    """STUB — AWS IoT Core mTLS publisher (lands in a later session).
+    """aiomqtt-backed publisher for AWS IoT Core (mTLS).
 
-    Accepts a ``TlsConfig`` at construction so the runner can instantiate
-    the object today (and so the abstract surface is satisfied), but
-    ``__aenter__`` raises ``NotImplementedError``. Reason: mTLS
-    provisioning needs an AWS account, which is still on the ⬜ list per
-    ``ml-obs-pipeline-context``. Writing the cert-loading code without
-    certs to test against would be speculative.
+    Same wire shape as ``LocalPublisher`` — JSON payload, QoS 0,
+    ``retain=False``, ``client_id == pump_id`` for per-Thing observability
+    in CloudWatch. The only differences from the local path are:
 
-    Per ADR 0003 (shape-only schema validation), the loader does NOT check
-    that ``tls.cert_path`` / ``tls.key_path`` / ``tls.ca_path`` exist on
-    disk — that check happens here, in the place that actually opens the
-    files, when this class is wired.
+    - **TLS material is loaded at connect time.** ``__aenter__`` checks
+      that ``tls.cert_path`` / ``tls.key_path`` / ``tls.ca_path`` all
+      resolve to existing files (clean ``PublisherError`` if any is
+      missing) before building an ``ssl.SSLContext`` and handing it to
+      ``aiomqtt.Client(tls_context=...)``. Per ADR 0003 Decision 5, the
+      loader does shape-only validation of the paths; the file-existence
+      and cert-parsing checks live here, where the file is actually
+      opened.
+    - **Default port is 8883.** AWS IoT Core's mTLS endpoint listens on
+      8883; the ``:443`` ALPN-with-``x-amzn-mqtt-ca`` fallback is for
+      networks that block 8883, which the project's home-network setup
+      doesn't need. URLs in the YAML are parsed leniently
+      (``mqtts://endpoint:8883`` or bare hostname both work).
+
+    Cert parsing failures (malformed PEM, key/cert mismatch, expired
+    CA, etc.) surface from ``ssl.SSLContext.load_*`` as ``ssl.SSLError`` /
+    ``OSError`` and get translated to ``PublisherError`` with a message
+    pointing at the file that failed — the runner's retry-forever loop
+    treats it the same as a transient connect error, which is the wrong
+    answer for "your cert is malformed" but the right answer for "the
+    cert file is being rewritten right now during a rotation." The PO
+    sees the error in the log either way.
     """
 
+    DEFAULT_PORT = 8883  # AWS IoT Core mTLS endpoint
+
     def __init__(self, url: str, client_id: str, tls: TlsConfig) -> None:
+        host, port = _parse_mqtt_url(url, self.DEFAULT_PORT)
+        self._host = host
+        self._port = port
         self._url = url
         self._client_id = client_id
         self._tls = tls
+        self._client: Optional[aiomqtt.Client] = None
 
     @property
     def url(self) -> str:
         return self._url
+
+    @property
+    def host(self) -> str:
+        return self._host
+
+    @property
+    def port(self) -> int:
+        return self._port
 
     @property
     def client_id(self) -> str:
@@ -186,24 +249,98 @@ class AwsIotPublisher(Publisher):
         return self._tls
 
     async def __aenter__(self) -> "AwsIotPublisher":
-        raise NotImplementedError(
-            "AwsIotPublisher is not yet wired. The AWS IoT mTLS publisher "
-            "lands in a later session, after the AWS account is provisioned. "
-            "See context/simulator.md and ADR 0003 for status; set "
-            "`broker.target: local` in your config for the meantime."
+        # Existence checks first — clearer error than "FileNotFoundError
+        # inside ssl.SSLContext.load_*" with no field name attached.
+        for field, path_str in (
+            ("cert_path", self._tls.cert_path),
+            ("key_path", self._tls.key_path),
+            ("ca_path", self._tls.ca_path),
+        ):
+            if not Path(path_str).is_file():
+                raise PublisherError(
+                    f"AWS IoT mTLS {field} not found: {path_str!r} "
+                    f"(check broker.tls in your config; the loader does not "
+                    f"check existence — see ADR 0003 Decision 5)"
+                )
+
+        # Build an SSLContext that validates the AWS IoT server cert
+        # against the Amazon Root CA and presents the per-Thing client
+        # cert for mTLS. ssl errors (malformed PEM, key/cert mismatch)
+        # surface as ssl.SSLError; FileNotFoundError shouldn't fire here
+        # because we just checked above, but a race (cert rotated mid-
+        # __aenter__) could still hit OSError — wrap both.
+        try:
+            tls_context = ssl.create_default_context(
+                purpose=ssl.Purpose.SERVER_AUTH,
+                cafile=self._tls.ca_path,
+            )
+            tls_context.load_cert_chain(
+                certfile=self._tls.cert_path,
+                keyfile=self._tls.key_path,
+            )
+        except (ssl.SSLError, OSError) as e:
+            raise PublisherError(
+                f"failed to build TLS context for {self._client_id!r} "
+                f"(cert={self._tls.cert_path!r}, key={self._tls.key_path!r}, "
+                f"ca={self._tls.ca_path!r}): {e}"
+            ) from e
+
+        self._client = aiomqtt.Client(
+            hostname=self._host,
+            port=self._port,
+            identifier=self._client_id,
+            tls_context=tls_context,
         )
+        try:
+            await self._client.__aenter__()
+        except aiomqtt.MqttError as e:
+            self._client = None
+            raise PublisherError(
+                f"failed to connect to AWS IoT Core at {self._host}:{self._port} "
+                f"as {self._client_id!r}: {e}"
+            ) from e
+        return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
-        # __aenter__ raised, so PEP 492 means __aexit__ is never called.
-        # This branch only fires if a subclass overrides __aenter__ and
-        # forgets to call super(). Kept as a defensive no-op.
-        return None
+        if self._client is None:
+            return
+        client = self._client
+        self._client = None
+        try:
+            await asyncio.wait_for(
+                client.__aexit__(exc_type, exc, tb),
+                timeout=DISCONNECT_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            # The 2026-05-28 follow-up to the aws-iot smoke test surfaced
+            # this: TLS close_notify handshake (or paho's keepalive flush)
+            # can block exit indefinitely. We log + return; the underlying
+            # socket is reaped by the OS when the process exits. Worst
+            # case is a half-closed connection at the broker, which AWS IoT
+            # tears down on keepalive timeout anyway.
+            log.warning(
+                "AWS IoT disconnect for %s timed out after %.1fs; forcing",
+                self._client_id, DISCONNECT_TIMEOUT_SECONDS,
+            )
+        except aiomqtt.MqttError:
+            # Same rationale as LocalPublisher.__aexit__ — disconnect-time
+            # transport blips don't deserve to hijack the exit path.
+            pass
 
     async def publish(self, topic: str, payload: dict[str, Any]) -> None:
-        raise NotImplementedError(
-            "AwsIotPublisher.publish is not yet wired; __aenter__ would "
-            "have raised first under normal usage."
-        )
+        if self._client is None:
+            raise PublisherError(
+                "publish() called outside `async with` — connect first"
+            )
+        try:
+            await self._client.publish(
+                topic,
+                payload=json.dumps(payload).encode("utf-8"),
+                qos=0,
+                retain=False,
+            )
+        except aiomqtt.MqttError as e:
+            raise PublisherError(f"publish to {topic} failed: {e}") from e
 
 
 def make_publisher(
