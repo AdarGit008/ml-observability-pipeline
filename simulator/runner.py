@@ -30,20 +30,36 @@ backoff, never reaching the 30s cap. Resetting on successful publish
 requires actually getting one message through before we trust the
 connection. Per Gemini Q3, 2026-05-25 mqtt-publishing review.
 
-The non-healthy-scenario guard lives in ``Fleet.from_config`` — caught at
-the top of the stack so a user with a bad config sees a clear message
-before any pump tries to connect. The previous ``broker.target: aws-iot``
-guard was dropped when ``AwsIotPublisher`` was wired (2026-05-27 session)
-— see ADR 0003 §Addendum 2026-05-27 "AwsIotPublisher wired"; the publisher
-itself is now the gate, raising ``PublisherError`` on transient transport
-errors and ``PublisherConfigError`` on static config errors.
+The non-healthy-scenario guard was dropped (2026-05-28 session, ADR 0004
+"Tick-Driven Scenario Controller") when the scenario layer landed —
+``Fleet.from_config`` now builds a concrete ``Scenario`` via
+``simulator.scenario.make_scenario(config)`` for all four
+``ScenarioKind`` values. The ``broker.target: aws-iot`` guard had been
+dropped earlier (2026-05-27, see ADR 0003 §Addendum). With both guards
+gone, the only halt-the-fleet exits are ``PublisherConfigError``
+(transport/cert) and ``ScenarioError`` (scenario logic / fleet
+mutation). Transient errors still go through retry-forever.
+
+Scenario task: ``Fleet.run`` spawns one extra asyncio task — the
+scenario controller — alongside the per-pump publish tasks. The
+controller wakes every ``tick_seconds`` and calls
+``scenario.apply(fleet, tick)``. Mutations to pump state land
+atomically between pump ticks because the event loop is
+single-threaded and ``Pump.step`` is synchronous. See ADR 0004.
+
+Task-lifecycle handling for mid-run ``add_pump``: ``run()`` uses
+``asyncio.wait(FIRST_COMPLETED)`` in a re-folding loop rather than
+``asyncio.gather(*tasks)``. Per Gemini Q2 (2026-05-28 scenarios review),
+``gather`` evaluates its arguments exactly once, so tasks created by
+``Fleet.add_pump`` mid-run would be orphaned. ``asyncio.TaskGroup``
+would be cleaner but is Python 3.11+; the test sandbox runs 3.10.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 from simulator.config import (
     ScenarioKind,
@@ -58,6 +74,12 @@ from simulator.publisher import (
     topic_for,
 )
 from simulator.pump import Pump
+from simulator.scenario import (
+    HealthyScenario,
+    Scenario,
+    ScenarioError,
+    make_scenario,
+)
 
 
 log = logging.getLogger(__name__)
@@ -90,6 +112,9 @@ class Fleet:
         members: Sequence[tuple[Pump, Publisher]],
         *,
         tick_seconds: float = DEFAULT_TICK_SECONDS,
+        scenario: Optional[Scenario] = None,
+        publisher_factory: Optional[Callable[[str], Publisher]] = None,
+        pump_factory: Optional[Callable[[str], Pump]] = None,
     ) -> None:
         if not members:
             raise ValueError(
@@ -101,10 +126,25 @@ class Fleet:
             )
         self._members: list[tuple[Pump, Publisher]] = list(members)
         self._tick_seconds = tick_seconds
+        # HealthyScenario as the default rather than None — keeps the
+        # run() shape uniform (always exactly one scenario controller
+        # task) and the apply() call site branch-free. See ADR 0004.
+        self._scenario: Scenario = scenario if scenario is not None else HealthyScenario()
+        # Factories used by add_pump() to construct new (Pump, Publisher)
+        # pairs at scenario-mutation time. Both are optional in __init__
+        # to keep direct-construction tests simple; Fleet.from_config
+        # always populates them. If a scenario calls add_pump() without
+        # them, add_pump raises ScenarioError.
+        self._publisher_factory = publisher_factory
+        self._pump_factory = pump_factory
         # Created lazily on first use so a Fleet can be constructed without
         # a running event loop. asyncio.Event binds to the loop that exists
         # when it's instantiated.
         self._shutdown: Optional[asyncio.Event] = None
+        # Per-pump tasks registered when run() spawns them. add_pump
+        # appends here so the new pump's task is gathered/cancelled
+        # alongside the originals.
+        self._tasks: list[asyncio.Task] = []
 
     @classmethod
     def from_config(
@@ -115,59 +155,60 @@ class Fleet:
     ) -> "Fleet":
         """Build a fleet from a validated ``SimulatorConfig``.
 
-        Rejects one case up front (cleaner UX than letting it surface from
-        inside a per-pump task):
+        All four ``ScenarioKind`` values are accepted — the scenario
+        layer landed 2026-05-28 (ADR 0004 "Tick-Driven Scenario
+        Controller"). The previous ``NotImplementedError`` for
+        non-healthy scenarios was dropped, mirroring the
+        ``broker.target: aws-iot`` drop on 2026-05-27 (ADR 0003
+        §Addendum). The scenario instance is built via
+        ``simulator.scenario.make_scenario`` and attached to the fleet
+        for its lifetime.
 
-        - ``config.scenario`` other than ``HEALTHY`` -> ``NotImplementedError``.
-          This check used to live in ``load_config`` as a ``UserWarning``
-          (2026-05-25 config-yaml session) and was moved here during the
-          2026-05-25 mqtt-publishing session so the loader is pure schema
-          validation (per ADR 0003).
+        ``config.broker.target == AWS_IOT`` is also not rejected here —
+        the ``AwsIotPublisher`` (wired 2026-05-27, see ADR 0003 §Addendum
+        2026-05-27 "AwsIotPublisher wired") is the gate. Missing certs
+        or connect failures surface as ``PublisherError`` /
+        ``PublisherConfigError`` and are handled by ``_run_pump``
+        (transient ones via retry-forever, static ones by halting the
+        fleet).
 
-        ``config.broker.target == AWS_IOT`` is NOT rejected here — the
-        ``AwsIotPublisher`` (wired 2026-05-27, see ADR 0003 §Addendum
-        2026-05-27 "AwsIotPublisher wired") is the gate. Missing certs or
-        connect failures surface as ``PublisherError`` /
-        ``PublisherConfigError`` and are handled by ``_run_pump`` (transient
-        ones via retry-forever, static ones by halting the fleet).
-
-        Note that publisher *construction* (via ``make_publisher``) can
-        itself raise ``PublisherConfigError`` — e.g., for an unparseable
-        URL — in which case the error propagates up from this method to
-        ``main()`` rather than surfacing inside a per-pump task. The
-        single fail-fast check that Gemini's Q5 suggested (pre-flighting
-        a secrets-dir existence check here) was deliberately skipped:
-        ``PublisherConfigError`` halting the fleet from inside the first
-        per-pump task that hits a missing cert covers the same UX with
-        less code. See `docs/sessions/2026-05-27-simulator-aws-iot-publisher.md`
-        §"Update 2026-05-28 #2" for the reasoning.
+        Pump / Publisher factories: closures over the config are stashed
+        so ``Fleet.add_pump`` (called by ``FleetExpansion``) can
+        construct further pumps mid-run with the same broker target +
+        ambient/setpoint settings. See ADR 0004.
         """
-        if config.scenario is not ScenarioKind.HEALTHY:
-            raise NotImplementedError(
-                f"scenario {config.scenario.value!r} is parsed but the "
-                "scenario runner is not yet implemented; only "
-                f"{ScenarioKind.HEALTHY.value!r} produces behavior today. "
-                "See context/simulator.md for scenario-runner status."
-            )
         profiles = profiles_for(config)
+
+        def _make_pump(pump_id: str) -> Pump:
+            idx = int(pump_id.split("-")[1])
+            return Pump(
+                pump_id,
+                ambient=config.fleet.ambient_celsius,
+                setpoint=config.fleet.setpoint_rpm,
+                seed=config.fleet.base_seed + idx,
+                profiles=profiles,
+            )
+
+        def _make_publisher(pump_id: str) -> Publisher:
+            return make_publisher(
+                target=config.broker.target,
+                url=config.broker.url,
+                client_id=pump_id,
+                tls=config.broker.tls,
+            )
+
         members: list[tuple[Pump, Publisher]] = []
         for i in range(config.fleet.pump_count):
             pid = pump_id_for(i)
-            pump = Pump(
-                pid,
-                ambient=config.fleet.ambient_celsius,
-                setpoint=config.fleet.setpoint_rpm,
-                seed=config.fleet.base_seed + i,
-                profiles=profiles,
-            )
-            publisher = make_publisher(
-                target=config.broker.target,
-                url=config.broker.url,
-                client_id=pid,
-                tls=config.broker.tls,
-            )
-            members.append((pump, publisher))
-        return cls(members, tick_seconds=tick_seconds)
+            members.append((_make_pump(pid), _make_publisher(pid)))
+
+        return cls(
+            members,
+            tick_seconds=tick_seconds,
+            scenario=make_scenario(config),
+            publisher_factory=_make_publisher,
+            pump_factory=_make_pump,
+        )
 
     @property
     def members(self) -> list[tuple[Pump, Publisher]]:
@@ -176,6 +217,66 @@ class Fleet:
     @property
     def tick_seconds(self) -> float:
         return self._tick_seconds
+
+    @property
+    def scenario(self) -> Scenario:
+        return self._scenario
+
+    def get_pump(self, pump_id: str) -> Pump:
+        """Look up a pump by id. Raises ``KeyError`` if not present.
+
+        Scenario controllers use this to target specific pumps (e.g.
+        ``RealFailure`` walks ``P-07`` through the lifecycle).
+        """
+        for pump, _ in self._members:
+            if pump.pump_id == pump_id:
+                return pump
+        raise KeyError(f"no pump with id {pump_id!r} in fleet")
+
+    def add_pump(self, pump_id: str) -> tuple[Pump, Publisher]:
+        """Add a new (Pump, Publisher) pair mid-run.
+
+        Called by scenarios that grow the fleet (``FleetExpansion``).
+        Builds a fresh pump + publisher via the factories stored at
+        construction time (set by ``Fleet.from_config``), appends them
+        to ``self._members``, and — if the fleet is currently running —
+        spawns a per-pump task for the new pair on the running event
+        loop. Returns the new pair so the caller can apply further
+        customisation (e.g. shifting the vibration baseline).
+
+        Raises ``ScenarioError`` if no factories are configured (a
+        direct ``Fleet(...)`` construction without factories cannot
+        grow the fleet) or the id collides with an existing member.
+
+        The new task is appended to ``self._tasks``. ``Fleet.run``'s
+        asyncio.wait-loop folds it into the awaited set on the next
+        iteration — per Gemini Q2 (2026-05-28 scenarios review).
+        """
+        if self._publisher_factory is None or self._pump_factory is None:
+            raise ScenarioError(
+                f"Fleet was constructed without pump/publisher factories "
+                f"— cannot add_pump({pump_id!r}). Build via Fleet.from_config "
+                "or pass factories to Fleet.__init__."
+            )
+        for existing, _ in self._members:
+            if existing.pump_id == pump_id:
+                raise ScenarioError(
+                    f"pump {pump_id!r} is already in the fleet"
+                )
+        pump = self._pump_factory(pump_id)
+        publisher = self._publisher_factory(pump_id)
+        self._members.append((pump, publisher))
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None  # type: ignore[assignment]
+        if running_loop is not None and self._tasks:
+            task = asyncio.create_task(
+                self._run_pump(pump, publisher),
+                name=f"pump-{pump.pump_id}",
+            )
+            self._tasks.append(task)
+        return pump, publisher
 
     def _ensure_shutdown(self) -> asyncio.Event:
         if self._shutdown is None:
@@ -195,44 +296,101 @@ class Fleet:
         self._ensure_shutdown().set()
 
     async def run(self) -> None:
-        """Run all per-pump tasks until shutdown is requested.
+        """Run all per-pump tasks + the scenario controller until shutdown.
 
-        Each task is independent for transient errors — a flaky pump
-        cannot drag the rest of the fleet down (retry-forever policy).
-        Static config errors (``PublisherConfigError``) are the
-        exception: any pump raising one halts the entire fleet (per
-        Gemini Q3, ADR 0003 §Addendum 2026-05-28). On halt, the
-        shutdown event is set, other per-pump tasks drain their
-        Publisher contexts within ``DISCONNECT_TIMEOUT_SECONDS``, and
-        the ``PublisherConfigError`` is re-raised so ``main()`` can
-        return a distinct exit code.
+        Each per-pump task is independent for transient errors — a
+        flaky pump cannot drag the rest of the fleet down
+        (retry-forever policy). Static config errors
+        (``PublisherConfigError``) and scenario errors
+        (``ScenarioError``) are halt-the-fleet conditions: any task
+        raising one stops the rest. On halt, the shutdown event is
+        set, other per-pump tasks drain their Publisher contexts
+        within ``DISCONNECT_TIMEOUT_SECONDS``, and the original
+        exception is re-raised so ``main()`` can return a distinct
+        exit code.
 
-        The disconnect-bound from the 2026-05-28 follow-up is
-        load-bearing here: without it, a pump mid-publish when the
-        fleet halts could stall the drain indefinitely.
+        Scenario controller: a single extra task wakes every
+        ``tick_seconds`` and calls ``scenario.apply(self, tick)``. Per
+        ADR 0004, this is the simplest shape that supports all three
+        concrete scenarios.
+
+        Task lifecycle: uses ``asyncio.wait(FIRST_COMPLETED)`` in a
+        re-folding loop rather than a single ``asyncio.gather`` so
+        that tasks created by ``add_pump`` mid-run are picked up on
+        the next iteration. Per Gemini Q2 review (2026-05-28
+        scenarios): ``gather(*tasks)`` evaluates its arguments
+        exactly once, so a mid-run-added pump task would be orphaned
+        — never awaited, exceptions lost, "Task was destroyed but it
+        is pending" warnings on shutdown. ``asyncio.TaskGroup`` would
+        be cleaner but is Python 3.11+; the sandbox tests run on
+        3.10 so we use the wait-loop pattern instead.
         """
         shutdown = self._ensure_shutdown()
-        tasks = [
+        self._tasks = [
             asyncio.create_task(
                 self._run_pump(pump, publisher),
                 name=f"pump-{pump.pump_id}",
             )
             for pump, publisher in self._members
         ]
+        scenario_task = asyncio.create_task(
+            self._run_scenario(),
+            name="scenario",
+        )
+        # ``awaited`` is the running registry of every task we've
+        # observed. ``pending`` is the subset still running. After
+        # each wait we re-scan ``self._tasks`` for newcomers (added
+        # by add_pump while we were awaiting) and fold them in.
+        awaited: set[asyncio.Task] = {scenario_task, *self._tasks}
+        pending: set[asyncio.Task] = set(awaited)
         try:
-            await asyncio.gather(*tasks)
-        except (PublisherConfigError, asyncio.CancelledError):
-            # Two paths into this except:
-            #   1. A per-pump task raised PublisherConfigError -> halt
-            #      the fleet (Gemini Q3 / ADR 0003 §Addendum 2026-05-28).
-            #   2. Outer cancellation from a signal handler that
-            #      couldn't use add_signal_handler.
-            # Both flows: set shutdown so the other per-pump tasks exit
-            # their Publisher contexts cleanly (bounded by
-            # DISCONNECT_TIMEOUT_SECONDS in publisher.py), drain, raise.
+            while pending:
+                done, _ = await asyncio.wait(
+                    pending, return_when=asyncio.FIRST_COMPLETED
+                )
+                pending -= done
+                for t in self._tasks:
+                    if t not in awaited:
+                        awaited.add(t)
+                        pending.add(t)
+                for t in done:
+                    exc = t.exception()
+                    if exc is not None:
+                        raise exc
+        except (PublisherConfigError, ScenarioError, asyncio.CancelledError):
             shutdown.set()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            for t in self._tasks:
+                if t not in awaited:
+                    awaited.add(t)
+            leftover = {t for t in awaited if not t.done()}
+            if leftover:
+                await asyncio.gather(*leftover, return_exceptions=True)
             raise
+
+    async def _run_scenario(self) -> None:
+        """Tick the scenario controller until shutdown.
+
+        Wakes on ``tick_seconds`` cadence. Calls
+        ``self._scenario.apply(self, tick)`` once per tick. If the
+        scenario raises ``ScenarioError``, this method re-raises (the
+        run() awaiter catches and triggers fleet halt). Other
+        exceptions are wrapped in ``ScenarioError`` so scenarios can't
+        leak undocumented exception types to the caller.
+        """
+        shutdown = self._ensure_shutdown()
+        tick = 0
+        while not shutdown.is_set():
+            try:
+                await self._scenario.apply(self, tick)
+            except ScenarioError:
+                raise
+            except Exception as e:  # noqa: BLE001 — see docstring
+                raise ScenarioError(
+                    f"scenario {type(self._scenario).__name__} raised at tick {tick}: {e}"
+                ) from e
+            tick += 1
+            if await self._wait_or_shutdown(self._tick_seconds, shutdown):
+                return
 
     async def _run_pump(self, pump: Pump, publisher: Publisher) -> None:
         shutdown = self._ensure_shutdown()
@@ -245,23 +403,12 @@ class Fleet:
                     while not shutdown.is_set():
                         reading = pump.step()
                         await publisher.publish(topic, reading)
-                        # Reset backoff on each successful publish (NOT on
-                        # connect). See module docstring + ADR 0003 for the
-                        # flapping vulnerability this closes (Gemini Q3,
-                        # 2026-05-25 mqtt-publishing review).
                         backoff = INITIAL_BACKOFF_SECONDS
                         if await self._wait_or_shutdown(
                             self._tick_seconds, shutdown
                         ):
                             return
             except PublisherConfigError as e:
-                # Static config error — halt the fleet rather than loop.
-                # Logged at ERROR (not WARNING) because the developer
-                # needs to act on this, not wait it out. Re-raise so
-                # Fleet.run's gather() cancels the other pumps and
-                # main() returns a distinct exit code.
-                # Catch ordering matters: PublisherConfigError MUST
-                # come before PublisherError (subclass first).
                 log.error(
                     "pump %s static config error (halting fleet): %s",
                     pump.pump_id, e,

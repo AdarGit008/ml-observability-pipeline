@@ -309,3 +309,54 @@ def test_initial_degradation_out_of_range_rejected():
 def test_initial_failed_state_snaps_degradation_to_one():
     p = Pump("P-01", initial_state=PumpState.FAILED)
     assert p.degradation == 1.0
+
+
+# -- Pump.get_profile / set_profile (Gemini Q4, 2026-05-28 scenarios review) --
+
+
+def test_get_profile_returns_current_state_profile():
+    """Public getter exposes the current per-state profile without
+    needing pump._profiles. Replaces private-attribute access."""
+    from simulator.pump import DEFAULT_PROFILES
+
+    p = Pump("P-00", seed=0)
+    for state in PumpState:
+        assert p.get_profile(state) == DEFAULT_PROFILES[state]
+
+
+def test_get_profile_rejects_non_pumpstate():
+    p = Pump("P-00", seed=0)
+    with pytest.raises(TypeError, match="state must be a PumpState"):
+        p.get_profile("HEALTHY")  # type: ignore[arg-type]
+
+
+def test_set_profile_updates_in_place():
+    """Replacing a state's profile changes degradation evolution on
+    the next step(). Spec: HEALTHY has rate_per_tick=0 by default;
+    raise it to 0.1 and one step should bump degradation."""
+    from simulator.pump import StateProfile
+
+    p = Pump("P-00", seed=0)
+    assert p.degradation == 0.0
+
+    p.set_profile(
+        PumpState.HEALTHY,
+        StateProfile(rate_per_tick=0.1, ceiling=0.5, dwell_ticks=1000),
+    )
+    p.step()
+    assert p.degradation == pytest.approx(0.1)
+
+
+def test_set_profile_rejects_non_pumpstate():
+    from simulator.pump import StateProfile
+
+    p = Pump("P-00", seed=0)
+    profile = StateProfile(rate_per_tick=0.0, ceiling=0.1, dwell_ticks=10)
+    with pytest.raises(TypeError, match="state must be a PumpState"):
+        p.set_profile("HEALTHY", profile)  # type: ignore[arg-type]
+
+
+def test_set_profile_rejects_non_stateprofile():
+    p = Pump("P-00", seed=0)
+    with pytest.raises(TypeError, match="profile must be a StateProfile"):
+        p.set_profile(PumpState.HEALTHY, {"rate": 0.1})  # type: ignore[arg-type]

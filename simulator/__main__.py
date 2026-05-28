@@ -39,12 +39,19 @@ matches the operator UX of ``uvicorn`` / ``aiohttp``.
 
 - ``0`` — normal exit (graceful shutdown via signal or end of work).
 - ``2`` — YAML/schema config error from ``load_config``.
-- ``3`` — runner refused to construct fleet (non-healthy scenario).
+- ``3`` — (retired 2026-05-28 scenario session — all four ScenarioKind
+  values now build a concrete Scenario; the NotImplementedError this
+  code mapped to no longer exists. Kept unallocated rather than
+  recycled so existing CI scripts that pattern-match exit 3 still
+  recognise it.)
 - ``4`` — publisher static config error (``PublisherConfigError`` —
   missing cert, malformed PEM, bad URL). Distinct from 2 so CI can tell
   "YAML is malformed" from "YAML is valid but cert is missing". Added
   2026-05-28 per Gemini Q3 (2026-05-27 aws-iot-publisher review) and
   ADR 0003 §Addendum 2026-05-28 "Static config errors halt the fleet".
+- ``5`` — scenario error (``ScenarioError`` — scenario logic / fleet
+  mutation failed; halt-the-fleet condition per ADR 0004). Added
+  2026-05-28 scenario-runner session.
 - ``130`` — forced exit on second Ctrl+C (POSIX SIGINT convention,
   128+2). Emitted by ``_ShutdownState.__call__`` via ``os._exit``.
 """
@@ -62,6 +69,7 @@ from pathlib import Path
 from simulator.config import ConfigError, load_config
 from simulator.publisher import PublisherConfigError
 from simulator.runner import Fleet
+from simulator.scenario import ScenarioError
 
 
 log = logging.getLogger(__name__)
@@ -74,9 +82,15 @@ FORCE_EXIT_CODE: int = 130
 
 # Exit code when a publisher raises PublisherConfigError (missing cert,
 # malformed PEM, bad URL). Distinct from 2 (YAML/schema error from
-# load_config) and 3 (runner NotImplementedError) so CI can distinguish
-# the failure modes. Added 2026-05-28 per Gemini Q3.
+# load_config) and 3 (legacy runner NotImplementedError, retired
+# 2026-05-28 — see module docstring) so CI can distinguish the failure
+# modes. Added 2026-05-28 per Gemini Q3.
 PUBLISHER_CONFIG_ERROR_CODE: int = 4
+
+# Exit code when the scenario controller raises ScenarioError (scenario
+# logic / fleet mutation failed; halt-the-fleet condition per ADR 0004).
+# Added 2026-05-28 scenario-runner session.
+SCENARIO_ERROR_CODE: int = 5
 
 
 def _loop_factory():
@@ -224,15 +238,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"config error: {e}", file=sys.stderr)
         return 2
 
-    # Fleet.from_config can also raise PublisherConfigError indirectly
+    # Fleet.from_config can raise PublisherConfigError indirectly
     # via make_publisher() -> Publisher.__init__ -> _parse_mqtt_url for
-    # an unparseable URL. Catch both NotImplementedError (non-healthy
-    # scenario) and PublisherConfigError (bad URL at construction).
+    # an unparseable URL. The NotImplementedError catch for non-healthy
+    # scenarios was retired 2026-05-28 (ADR 0004 — all four
+    # ScenarioKind values now build a concrete Scenario).
     try:
         fleet = Fleet.from_config(config)
-    except NotImplementedError as e:
-        print(f"runner error: {e}", file=sys.stderr)
-        return 3
     except PublisherConfigError as e:
         print(f"publisher config error: {e}", file=sys.stderr)
         return PUBLISHER_CONFIG_ERROR_CODE
@@ -255,6 +267,14 @@ def main(argv: list[str] | None = None) -> int:
         # missing on disk" (exit 4). Added 2026-05-28 per Gemini Q3.
         print(f"publisher config error: {e}", file=sys.stderr)
         return PUBLISHER_CONFIG_ERROR_CODE
+    except ScenarioError as e:
+        # Propagated up from the scenario controller task. Fleet.run
+        # drained pump tasks the same way it does for
+        # PublisherConfigError, then re-raised. Distinct exit code so
+        # CI can tell "scenario logic broke" from "MQTT certs broke".
+        # ADR 0004.
+        print(f"scenario error: {e}", file=sys.stderr)
+        return SCENARIO_ERROR_CODE
     return 0
 
 

@@ -2,8 +2,8 @@
 
 Synthetic telemetry for ~15 industrial pumps per PLAN.md §2.2. This package
 owns the physical model (``pump``), the YAML config schema (``config``),
-the MQTT publishing layer (``publisher``), and the asyncio fleet runner
-(``runner``).
+the MQTT publishing layer (``publisher``), the asyncio fleet runner
+(``runner``), and the scenario controllers (``scenario``).
 
 Run from the command line:
 
@@ -40,6 +40,15 @@ from simulator.runner import (
     Fleet,
     pump_id_for,
 )
+from simulator.scenario import (
+    FleetExpansion,
+    HealthyScenario,
+    RealFailure,
+    Scenario,
+    ScenarioError,
+    SeasonalDrift,
+    make_scenario,
+)
 
 __all__ = [
     # Physical model
@@ -71,4 +80,12 @@ __all__ = [
     "DEFAULT_TICK_SECONDS",
     "INITIAL_BACKOFF_SECONDS",
     "MAX_BACKOFF_SECONDS",
+    # Scenario
+    "Scenario",
+    "HealthyScenario",
+    "SeasonalDrift",
+    "FleetExpansion",
+    "RealFailure",
+    "ScenarioError",
+    "make_scenario",
 ]

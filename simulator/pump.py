@@ -164,6 +164,33 @@ class Pump:
     def ticks_in_state(self) -> int:
         return self._ticks_in_state
 
+    @property
+    def ambient(self) -> float:
+        """Current ambient temperature (°C) the bearing sees.
+
+        Read-write — scenarios (``simulator.scenario``) mutate this to
+        simulate plant-wide environmental shifts (e.g., seasonal_drift
+        modulates this on a sine wave). The bearing_temp equation is
+        additively driven by ambient (PLAN.md §2.2):
+
+            bearing_temp = ambient + 0.02 * RPM + degradation * 15 + N(0, 0.5)
+
+        so a fleet-wide ambient shift produces the systematic bearing_temp
+        rise the drift detector should catch as a fleet-level PSI breach.
+        """
+        return self._ambient
+
+    def set_ambient(self, value: float) -> None:
+        """Update the ambient temperature this pump sees on subsequent ticks.
+
+        Intended for scenario controllers (``simulator.scenario``). Takes
+        effect on the next ``step()`` call. Same range envelope as the
+        constructor's ``ambient`` argument is NOT enforced here — scenarios
+        are trusted to keep values physically plausible (the config-level
+        envelope catches typos at YAML load time).
+        """
+        self._ambient = float(value)
+
     def force_state(self, state: PumpState) -> None:
         """Manually transition to ``state``. Resets the in-state tick counter."""
         if not isinstance(state, PumpState):
@@ -172,6 +199,52 @@ class Pump:
         self._ticks_in_state = 0
         if state is PumpState.FAILED:
             self._degradation = 1.0
+
+    def get_profile(self, state: PumpState) -> StateProfile:
+        """Return the current ``StateProfile`` for ``state``.
+
+        Public accessor for scenario controllers
+        (``simulator.scenario``) that want to read existing parameters
+        before overriding (e.g. ``FleetExpansion`` preserves
+        ``rate_per_tick`` + ``dwell_ticks`` while shifting only
+        ``ceiling``). Per Gemini Q4 (2026-05-28 scenarios review) —
+        replaces reaching into ``pump._profiles``, which a senior-role
+        reviewer would flag as private-attribute leakage.
+        """
+        if not isinstance(state, PumpState):
+            raise TypeError(
+                f"state must be a PumpState, got {type(state).__name__}"
+            )
+        return self._profiles[state]
+
+    def set_profile(self, state: PumpState, profile: StateProfile) -> None:
+        """Replace the ``StateProfile`` for ``state``.
+
+        Intended for scenario controllers customising per-pump
+        dynamics (e.g. ``FleetExpansion`` shifting a new pump's
+        HEALTHY ceiling to put its vibration baseline outside the
+        model's training distribution). Takes effect on the next
+        ``step()`` call.
+
+        The new profile is stored in the same per-pump dict that
+        ``__init__`` populates from ``DEFAULT_PROFILES`` + the
+        constructor's ``profiles`` arg. No validation beyond type
+        checks — scenarios are trusted to keep ceilings in [0, 1] and
+        rates non-negative; bad values land in the same envelope as
+        the ``DEFAULT_PROFILES`` typo-protection.
+
+        Per Gemini Q4 (2026-05-28 scenarios review) — the cleaner
+        public replacement for ``pump._profiles[state] = profile``.
+        """
+        if not isinstance(state, PumpState):
+            raise TypeError(
+                f"state must be a PumpState, got {type(state).__name__}"
+            )
+        if not isinstance(profile, StateProfile):
+            raise TypeError(
+                f"profile must be a StateProfile, got {type(profile).__name__}"
+            )
+        self._profiles[state] = profile
 
     def step(self, now: Optional[datetime] = None) -> dict:
         """Advance one tick and return a telemetry reading.

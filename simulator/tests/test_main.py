@@ -131,10 +131,12 @@ def test_fleet_is_only_called_via_request_shutdown_not_via_force():
 
 
 def test_publisher_config_error_code_is_4_distinct_from_other_failures():
-    """Pin the exit code so CI scripts can rely on the value. 2 was
-    config-parse (ConfigError from load_config), 3 was runner-construction
-    failure (NotImplementedError), 4 is PublisherConfigError. The three
-    must remain distinct."""
+    """Pin the exit code so CI scripts can rely on the value. 2 is
+    config-parse (ConfigError from load_config). 3 was runner-construction
+    failure (NotImplementedError) — retired 2026-05-28 when the scenario
+    layer landed (ADR 0004); the code itself is unallocated so existing
+    CI patterns don't accidentally match a new failure. 4 is
+    PublisherConfigError. 5 is ScenarioError (ADR 0004)."""
     assert PUBLISHER_CONFIG_ERROR_CODE == 4
 
 
@@ -220,9 +222,17 @@ def test_main_returns_2_when_config_parse_error(tmp_path):
     assert rc == 2
 
 
-def test_main_returns_3_when_scenario_not_implemented(tmp_path):
-    """Pin that 3 (NotImplementedError from runner) is still distinct
-    from 4. A non-healthy scenario in valid YAML returns 3."""
+def test_main_no_longer_returns_3_for_non_healthy_scenario(tmp_path, monkeypatch):
+    """The NotImplementedError -> exit 3 mapping was retired 2026-05-28
+    (ADR 0004 "Tick-Driven Scenario Controller"). A non-healthy scenario
+    now builds a real Fleet and proceeds; we short-circuit
+    ``asyncio.run`` so this test exercises just the ``Fleet.from_config``
+    path without touching the network.
+
+    Mirrors the 2026-05-27 retirement of the parallel ``broker.target:
+    aws-iot`` reject; the test that used to assert 'rejected' is now
+    asserting 'accepted' — same shape change, one session later.
+    """
     p = tmp_path / "config.yaml"
     p.write_text(textwrap.dedent("""\
         fleet:
@@ -236,5 +246,20 @@ def test_main_returns_3_when_scenario_not_implemented(tmp_path):
           url: "mqtt://localhost:1883"
         demo_mode: false
         """))
+
+    # Stub asyncio.run so main()'s post-Fleet.from_config path doesn't
+    # actually try to connect to a broker. Close the coroutine we get
+    # handed so pytest doesn't emit "coroutine was never awaited".
+    import simulator.__main__ as main_mod
+
+    def _stub_run(coro, *a, **kw):
+        coro.close()
+        return None
+
+    monkeypatch.setattr(main_mod.asyncio, "run", _stub_run)
+
     rc = main(["--config", str(p), "--log-level", "ERROR"])
-    assert rc == 3
+    # Specifically NOT 3 — the retired code. 0 (run completed) is the
+    # expected outcome with asyncio.run stubbed.
+    assert rc != 3
+    assert rc == 0

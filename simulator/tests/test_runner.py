@@ -172,12 +172,25 @@ def test_from_config_uses_local_publisher_for_local_target():
 
 
 @pytest.mark.parametrize(
-    "scenario",
-    [ScenarioKind.SEASONAL_DRIFT, ScenarioKind.FLEET_EXPANSION, ScenarioKind.REAL_FAILURE],
+    "scenario, expected_cls_name",
+    [
+        (ScenarioKind.SEASONAL_DRIFT, "SeasonalDrift"),
+        (ScenarioKind.FLEET_EXPANSION, "FleetExpansion"),
+        (ScenarioKind.REAL_FAILURE, "RealFailure"),
+        (ScenarioKind.HEALTHY, "HealthyScenario"),
+    ],
 )
-def test_from_config_rejects_non_healthy_scenario(scenario: ScenarioKind):
-    with pytest.raises(NotImplementedError, match="scenario runner is not yet implemented"):
-        Fleet.from_config(_config(scenario=scenario))
+def test_from_config_accepts_all_scenarios(scenario: ScenarioKind, expected_cls_name: str):
+    """The NotImplementedError reject was dropped on 2026-05-28 when the
+    scenario layer landed (ADR 0004 "Tick-Driven Scenario Controller").
+    All four ScenarioKind values now build a concrete Scenario.
+
+    Mirrors the parallel 2026-05-27 change for ``broker.target: aws-iot``
+    (ADR 0003 §Addendum 2026-05-27 "AwsIotPublisher wired"), where the
+    similar guard at this layer was dropped because the implementation
+    landed."""
+    fleet = Fleet.from_config(_config(scenario=scenario))
+    assert type(fleet.scenario).__name__ == expected_cls_name
 
 
 def test_from_config_uses_aws_iot_publisher_for_aws_iot_target():
@@ -378,8 +391,16 @@ def test_fleet_backoff_climbs_to_cap_then_holds(monkeypatch):
 
     recorded_waits: list[float] = []
 
+    # tick_seconds=999.0 disambiguates the scenario-task's per-tick
+    # wait (added 2026-05-28 with the scenario layer — ADR 0004) from
+    # the backoff sequence we want to record. The pre-existing
+    # test_fleet_backoff_resets_on_successful_publish uses the same
+    # pattern for the same reason.
+    TICK_SECONDS = 999.0
+
     async def _recording_wait(seconds: float, shutdown: asyncio.Event) -> bool:
-        recorded_waits.append(seconds)
+        if seconds != TICK_SECONDS:
+            recorded_waits.append(seconds)
         # Let the test collect 7 backoff values, then return True (the
         # signal that means "shutdown observed — exit the retry loop").
         return len(recorded_waits) >= 7
@@ -392,7 +413,7 @@ def test_fleet_backoff_climbs_to_cap_then_holds(monkeypatch):
 
     pumps = [Pump("P-00", seed=0)]
     pubs = [FlakyPublisher(fail_count=1_000_000, pump_id="P-00")]
-    fleet = Fleet(list(zip(pumps, pubs)), tick_seconds=999.0)
+    fleet = Fleet(list(zip(pumps, pubs)), tick_seconds=TICK_SECONDS)
 
     async def _go():
         await asyncio.wait_for(fleet.run(), timeout=1.0)
