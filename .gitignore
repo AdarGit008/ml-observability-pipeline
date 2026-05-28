@@ -35,7 +35,14 @@ simulator/.secrets/
 # User-local simulator config (per PO decision 2026-05-25 on Gemini add'l obs A —
 # strict loader, no auto-defaults; users copy config.example.yaml -> config.yaml
 # and tune locally; UX work deferred to a later onboarding session).
-simulator/config.yaml
+#
+# Glob covers all per-developer copies — config.yaml (local Mosquitto smoke),
+# config.aws-iot.yaml (added 2026-05-27 for the AWS IoT Phase D smoke), and any
+# future config.<variant>.yaml — without needing another .gitignore edit each
+# time. config.example.yaml is the only checked-in variant; the negation keeps
+# it tracked.
+simulator/config*.yaml
+!simulator/config.example.yaml
 
 # Local data (Docker volumes — InfluxDB, Mosquitto persistence when local_runtime lands)
 data/
