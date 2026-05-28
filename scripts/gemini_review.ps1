@@ -19,13 +19,23 @@
   if Pro is over capacity (503s) or for cheaper/faster reviews.
 
 .PARAMETER Date
-  Date prefix of the packet file. Defaults to today (YYYY-MM-DD).
+  Date prefix of the packet file. When omitted, the script globs
+  review_packets/*-<slug>.md and picks the newest match (lexicographic
+  on YYYY-MM-DD == chronologically newest). Explicit -Date overrides
+  the auto-pick — useful when reviewing an older packet or when two
+  sessions share a slug. The 2026-05-28 update added the auto-pick
+  behavior; the today-only default broke when reviews lagged a day
+  behind the packet date (e.g. the 2026-05-27 aws-iot-publisher
+  packet reviewed on 2026-05-28).
 
 .EXAMPLE
   .\scripts\gemini_review.ps1 -Slug simulator-pump
 
 .EXAMPLE
   .\scripts\gemini_review.ps1 -Slug simulator-pump -Model gemini-2.5-flash
+
+.EXAMPLE
+  .\scripts\gemini_review.ps1 -Slug simulator-pump -Date 2026-05-24
 
 .NOTES
   Requires $env:GEMINI_API_KEY (get one at https://aistudio.google.com/apikey).
@@ -35,13 +45,31 @@
 param(
   [Parameter(Mandatory = $true)][string]$Slug,
   [string]$Model = "gemini-pro-latest",
-  [string]$Date = (Get-Date -Format "yyyy-MM-dd"),
+  [string]$Date,
   [switch]$DumpBody
 )
 
 $ErrorActionPreference = "Stop"
 
-$packet   = Join-Path "review_packets"   "$Date-$Slug.md"
+# If -Date wasn't explicitly passed, find the newest packet for this slug.
+# PSBoundParameters.ContainsKey is the canonical "did the caller pass this
+# parameter" check — checking $Date for empty would also be true when the
+# user explicitly passed -Date "" (we want to error in that case, not glob).
+if (-not $PSBoundParameters.ContainsKey("Date")) {
+  $candidates = Get-ChildItem -Path "review_packets" -Filter "*-$Slug.md" -ErrorAction SilentlyContinue |
+                Sort-Object Name -Descending
+  if (-not $candidates) {
+    Write-Error "No packet found for slug '$Slug' under review_packets/. Tried glob '*-$Slug.md'. Pass -Date YYYY-MM-DD if the slug differs."
+    exit 1
+  }
+  $packet = $candidates[0].FullName
+  # Re-derive $Date from the picked filename so the response file matches
+  # the packet's date (and so -DumpBody lands at the same date prefix).
+  $Date = $candidates[0].BaseName -replace "-$Slug$", ""
+  Write-Host "Auto-selected packet: $($candidates[0].Name)" -ForegroundColor Cyan
+} else {
+  $packet = Join-Path "review_packets" "$Date-$Slug.md"
+}
 $response = Join-Path "review_responses" "$Date-$Slug.md"
 
 if (-not (Test-Path $packet))      { Write-Error "Packet not found: $packet"; exit 1 }
