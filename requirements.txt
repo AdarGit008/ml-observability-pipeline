@@ -6,6 +6,8 @@
 # Dev-only deps (pytest, ruff, mypy, etc.) will land in requirements-dev.txt
 # once we add CI or a dev_workflow session declares them.
 
-PyYAML>=6.0       # simulator/config.py — config-yaml session 2026-05-25
-aiomqtt>=2.0      # simulator/publisher.py — mqtt session 2026-05-25; asyncio-native wrapper around paho-mqtt by the same maintainer (see ADR 0003)
-paho-mqtt>=2.0    # transitive dep of aiomqtt; pinned explicitly so cert/QoS knobs we use are visible in this file
+PyYAML>=6.0                # simulator/config.py + local_runtime/config.py — config-yaml session 2026-05-25
+aiomqtt>=2.0               # simulator/publisher.py + local_runtime/subscriber.py — mqtt session 2026-05-25; asyncio-native wrapper around paho-mqtt by the same maintainer (see ADR 0003)
+paho-mqtt>=2.0             # transitive dep of aiomqtt; pinned explicitly so cert/QoS knobs we use are visible in this file
+numpy>=1.26                # shared/features.py — pure-numpy rolling mean/std for the 8-feature extractor (mode-parity boundary; see ADR 0005). local_runtime session 2026-05-29.
+influxdb-client[async]>=1.40  # local_runtime/influx_writer.py — official Python client for InfluxDB v2.x with the [async] extra (aiohttp-backed InfluxDBClientAsync). The [async] extra is load-bearing per Gemini Q4 of the 2026-05-29 review. local_runtime session 2026-05-29.

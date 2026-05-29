@@ -1,0 +1,68 @@
+# Local-mode infrastructure for the ML Observability Pipeline.
+#
+# Brings up the broker the simulator publishes to and the TSDB the
+# local_runtime service writes scored rows into. Grafana lands in a
+# future "dashboards" session (PLAN.md §2.9).
+#
+# Usage:
+#   docker compose up -d                  # broker + TSDB
+#   python -m simulator &                 # publishes telemetry
+#   python -m local_runtime               # subscribes + scores + writes
+#
+# Onboarding contract (DoD #2 of the 2026-05-29 local_runtime session):
+# a fresh clone with `docker compose up -d`, `python -m simulator`, and
+# `python -m local_runtime` produces a non-zero row count in
+# `pump_telemetry` within `tick_seconds * 2` (~4 s @ default).
+#
+# Cost: $0. Everything here is local Docker — no AWS resources touched.
+
+services:
+  mosquitto:
+    # 2.0.x is the latest stable as of the 2026-05-25 mqtt-publishing
+    # session; the simulator's smoke test (.local/mosquitto.conf +
+    # .local/mqtt_probe.py) ran against this image.
+    image: eclipse-mosquitto:2.0
+    container_name: ml-obs-mosquitto
+    ports:
+      - "1883:1883"
+    volumes:
+      # Reuse the .local/mosquitto.conf the simulator's smoke test
+      # already established — single source of truth for "what
+      # Mosquitto listens for" across both the publisher and the
+      # subscriber.
+      - ./.local/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    restart: unless-stopped
+
+  influxdb:
+    # InfluxDB v2.x is the OSS line — v3.x is cloud-only at portfolio
+    # scale. Pinning v2.7 because the official Python client
+    # `influxdb-client` is v2-native; v3 needs a different client.
+    image: influxdb:2.7
+    container_name: ml-obs-influxdb
+    ports:
+      - "8086:8086"
+    environment:
+      # Auto-setup on first boot so a fresh clone doesn't need a
+      # `influx setup` call. The token below is what the
+      # local_runtime config picks up via ${INFLUX_TOKEN} — set it in
+      # your shell before `python -m local_runtime`:
+      #   export INFLUX_TOKEN=ml-obs-local-token   # bash/zsh
+      #   $env:INFLUX_TOKEN = "ml-obs-local-token" # PowerShell
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: admin
+      DOCKER_INFLUXDB_INIT_PASSWORD: ml-obs-admin-password
+      DOCKER_INFLUXDB_INIT_ORG: ml-obs
+      DOCKER_INFLUXDB_INIT_BUCKET: pump_telemetry
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ml-obs-local-token
+    volumes:
+      # Persist the bucket across `docker compose down` so the smoke
+      # row count isn't wiped between dev iterations. Named volume
+      # (not a bind mount) so the OS doesn't fight Windows file
+      # permissions.
+      - influxdb_data:/var/lib/influxdb2
+      - influxdb_config:/etc/influxdb2
+    restart: unless-stopped
+
+volumes:
+  influxdb_data:
+  influxdb_config:

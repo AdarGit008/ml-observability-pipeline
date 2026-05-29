@@ -1,0 +1,45 @@
+# local_runtime/config.example.yaml — annotated example.
+#
+# Copy this file to `local_runtime/config.yaml` (gitignored by default)
+# and tune for your run. The loader in `local_runtime/config.py` enforces:
+#   - every top-level key below is required (no silent defaults)
+#   - unknown keys raise (catches typos)
+#   - types are checked strictly (booleans are NOT integers, etc.)
+#   - influx.token of the form `${VAR}` resolves from the environment
+#
+# Run `python -c "from local_runtime.config import load_config; print(load_config('local_runtime/config.yaml'))"`
+# to sanity-check after edits, or `python -m local_runtime --config local_runtime/config.yaml`
+# to start the scorer service.
+
+mqtt:
+  # Local Mosquitto endpoint. Matches the docker-compose service from
+  # the repo root. The wildcard topic factory/pumps/+/telemetry is
+  # hard-coded in subscriber.py per context/_interfaces.md.
+  url: "mqtt://localhost:1883"
+
+  # MQTT client_id for the subscriber connection. Single connection,
+  # not per-pump — see ADR 0005 for the topology decision. Use a
+  # distinct id from any simulator pump (P-NN) to keep Mosquitto's
+  # client log unambiguous.
+  client_id: "local-runtime"
+
+influx:
+  # InfluxDB v2 endpoint. Matches the docker-compose service.
+  url: "http://localhost:8086"
+
+  # Auth token. ${INFLUX_TOKEN} resolves from the environment so the
+  # YAML can be committed without secrets. Set the env var to the
+  # token printed by `influx auth list` after the docker-compose
+  # InfluxDB initializes.
+  token: "${INFLUX_TOKEN}"
+
+  # Organization + bucket. Defaults below match the docker-compose
+  # INFLUXDB_INIT_ORG / INFLUXDB_INIT_BUCKET environment values.
+  org: "ml-obs"
+  bucket: "pump_telemetry"
+
+# Simulator publish cadence (seconds). Used to size the rolling
+# feature window: window_samples = ceil(300 / tick_seconds) so the
+# 5-minute rolling stats from PLAN.md §2.3 cover the right span.
+# At the default 2.0s tick this gives 150 samples.
+tick_seconds: 2.0
