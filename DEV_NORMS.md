@@ -92,7 +92,7 @@ Gemini participates via the Gemini REST API, called from `scripts/gemini_review.
 
 ## 5. Modular context — no bleed between sessions
 
-The biggest risk of multi-session work is context drift: loading irrelevant docs that crowd the model's attention. We mitigate this with a deliberate three-tier loading system.
+The biggest risk of multi-session work is context drift: loading irrelevant docs that crowd the model's attention. We mitigate this with a deliberate four-tier loading system.
 
 ### Tier 1 — Always load (~small)
 - `DEV_NORMS.md` (this file)
@@ -103,6 +103,18 @@ The biggest risk of multi-session work is context drift: loading irrelevant docs
 - `context/<component>.md` — exactly one per session, matching the component being worked on
 - Components mirror the `PLAN.md §1` repo layout: `simulator`, `model`, `lambda_scorer`, `lambda_s3_batcher`, `drift`, `local_runtime`, `infra`, `dashboards`, `dev_workflow`
 
+### Tier 2b — Parity-touching components (load IN ADDITION to Tier 2)
+
+Some components share logic across the local/AWS boundary via the top-level `shared/` package (locked by ADR 0005). If the session's `Component:` is in the parity set below, OR the `Intent:` mentions scoring, drift, feature extraction, or anything that calls `extract_features` / `score` / `compute_psi`, the brief MUST also load:
+
+- The on-disk source: `shared/features.py`, `shared/score.py`, `shared/drift.py` (read, don't re-derive).
+- The locked contract: `docs/adr/0005-shared-mode-parity-package-and-subscriber-topology.md`.
+- The enforcement test (cite by name; do NOT delete to "fix" a parity break): `local_runtime/tests/test_service.py::test_structural_parity_no_vendoring` (+ siblings for `score` and `compute_psi`).
+
+**Parity set (as of 2026-05-29):** `lambda_scorer`, `model`, `drift`, `local_runtime`, `dashboards`. Any future component that calls into `shared/` joins the set; add it here in the same PR that adds the import.
+
+**Why this is its own tier:** the parity contract is a hard cross-component invariant, not a component file. A session that touches the boundary without loading it risks silent divergence — and silent divergence between local and AWS modes violates north star #6 (mode parity). The PO and Claude both should refuse to start work if a session brief for a parity-set component omits these loads.
+
 ### Tier 3 — Interfaces (load only if work crosses components)
 - `context/_interfaces.md` — MQTT schema, DynamoDB schema, Lambda envelopes, etc.
 
@@ -112,7 +124,7 @@ The PO opens a session with a one-line declaration matching `templates/session_b
 ```
 Component: lambda_scorer
 Intent:    Implement DynamoDB read+append for feature window
-Loads:     _global, lambda_scorer, _interfaces
+Loads:     _global, lambda_scorer, _interfaces, shared/ + ADR 0005   # ← Tier 2b: parity-touching
 ```
 
 Claude reads exactly those files. Nothing else.
@@ -150,6 +162,7 @@ Template: `templates/review_packet_template.md`.
 | Question | Answer |
 |---|---|
 | "Why did we pick DynamoDB over Timestream?" | ADR 0003 |
+| "Where does the mode-parity contract live?" | ADR 0005 + `shared/` |
 | "What was decided about PSI smoothing on 2026-05-30?" | Session log for that date |
 | "Did Gemini flag the cold-start risk?" | Review response for that session |
 | "What is the current MQTT topic schema?" | `context/_interfaces.md` |
@@ -180,6 +193,7 @@ Before closing a session, Claude verifies:
 - [ ] Session log written, dated, committed.
 - [ ] ADR written if an architectural decision was made.
 - [ ] `context/<component>.md` updated if interfaces or open questions changed.
+- [ ] For parity-touching sessions (Tier 2b): structural parity tests still pass.
 - [ ] PO has approved the merge.
 
 ---
