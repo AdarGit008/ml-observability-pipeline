@@ -61,8 +61,11 @@ The local_runtime session adopts the following three-part design:
 3. **InfluxDB schema for the `pump_telemetry` measurement:**
    - Tags: `pump_id` (one tag, low cardinality 1–100).
    - Fields: 8 feature fields (named per `shared.features.FEATURE_NAMES`)
-     + `score` + 8 PSI fields prefixed `psi_<feature>`. Total: 17
-     numeric fields per point.
+     + `score` + 4 PSI fields prefixed `psi_<feature>` (per
+     `shared.features.PSI_FEATURE_NAMES`; ADR 0009 shrank the PSI
+     surface from 8 to 4 — rolling features are scorer inputs
+     only). Total: 13 numeric fields per point on compute ticks
+     (was 17 pre-ADR-0009). See §Addendum 2026-06-03 — ADR 0009.
    - Timestamp: the telemetry payload's `ts`, normalised to UTC.
 
 ## Alternatives considered
@@ -375,3 +378,45 @@ copy inside `local_runtime/` would now fail loudly.
 
 303 → 308 passing, 1 pre-existing skip. New: 3 structural parity
 tests + 2 reshaped Influx writer tests covering the async context.
+
+## Addendum 2026-06-03 — ADR 0009 (PSI surface ≠ scorer feature set)
+
+The 2026-06-02 measurement (ADR 0008 §Negative) showed per-pump PSI on
+the four rolling features (`vibration_amp_mean_5m`,
+`vibration_amp_std_5m`, `bearing_temp_mean_5m`, `bearing_temp_std_5m`)
+is autocorrelation-bounded above the 0.10 STABLE band on healthy
+fleets — root cause is structural (consecutive rolling-window samples
+share 149/150 readings, violating PSI's IID assumption), not
+sample-size-bounded. ADR 0009 (2026-06-03) closes the
+autocorrelated-PSI-threshold-semantics open question by dropping the
+four rolling features from the PSI surface entirely. They remain
+scorer inputs — the asymmetry between scorer input set
+(`FEATURE_NAMES`, 8 entries) and PSI surface (`PSI_FEATURE_NAMES`, 4
+entries) is the load-bearing decision.
+
+**Schema impact (this ADR's §3):** the per-point field count goes
+**17 → 13 on compute ticks**. The four retired `psi_*` field names
+(`psi_vibration_amp_mean_5m`, `psi_vibration_amp_std_5m`,
+`psi_bearing_temp_mean_5m`, `psi_bearing_temp_std_5m`) simply stop
+being written. Historical rows in InfluxDB that carry those fields
+are unaffected; Grafana queries against those field names go from
+"last value = recent reading" to "last value = old reading" — the
+right behaviour for a retired channel. Non-compute ticks keep the
+9-field shape unchanged.
+
+**Mode-parity boundary unchanged.** `shared.features.PSI_FEATURE_NAMES`
+lives next to `FEATURE_NAMES` in `shared/features.py`; both modes
+import it as peers. The structural-parity tests
+(`test_structural_parity_no_vendoring` + siblings) stay green.
+`local_runtime/tests/test_features.py::test_psi_feature_names_is_subset_of_feature_names`
+pins the strict-subset relation so a future "let me add a feature
+to PSI" PR has to update ADR 0009.
+
+**Dashboards pickup:** the dashboards session (not yet started) wires
+its PSI panel set against the four surviving field names from day
+one — `psi_vibration_amp`, `psi_bearing_temp`, `psi_motor_current`,
+`psi_rpm`. PLAN.md §2.7 bands (< 0.10 / 0.10–0.25 / > 0.25) apply
+uniformly across all four; no conditional band logic needed.
+
+See ADR 0009 for the long-form rationale, alternatives considered,
+and consequences.

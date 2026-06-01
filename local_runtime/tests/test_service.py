@@ -1,12 +1,22 @@
 """End-to-end tests for local_runtime.service.ScorerService.
 
-Uses FakeWriter to assert the full per-message path: window append →
-feature extraction → score → PSI → InfluxDB write.
+Uses FakeWriter to assert the full per-message path: window append ->
+feature extraction -> score -> PSI -> InfluxDB write.
 
-Also pins the mode-parity invariant: ``extract_features`` is the only
-call site that needs to match Lambda. The service module imports it
-from ``shared.features`` (not a local fork), so this test verifies
-that the importable path is the parity boundary.
+Also pins the mode-parity invariant: ``extract_features``, ``score``,
+and ``compute_psi`` are the only call sites that need to match Lambda.
+The service module imports each from ``shared/`` (not a local fork),
+so this test verifies the importable paths are the parity boundary.
+
+Drift session 2026-06-01 added the per-pump feature-history deque and
+the every-Nth-tick PSI cadence (ADR 0007). The PSI-presence test was
+updated to inject ``psi_period_ticks=1`` so a single message produces
+a row with PSI. Two new tests pin the cadence behaviour: PSI is None
+on non-compute ticks and present on the compute boundary.
+
+ADR 0009 (2026-06-03) shrank the PSI surface from 8 features to 4.
+The ``row.psi`` dict's key set asserts against ``PSI_FEATURE_NAMES``
+rather than ``FEATURE_NAMES``.
 """
 
 from __future__ import annotations
@@ -25,7 +35,7 @@ from local_runtime.config import (
 from local_runtime.influx_writer import ScoredRow
 from local_runtime.service import ScorerService
 from local_runtime.window import FeatureWindow
-from shared.features import FEATURE_NAMES
+from shared.features import FEATURE_NAMES, PSI_FEATURE_NAMES
 
 
 def _run(coro):
@@ -101,7 +111,7 @@ def test_service_handle_populates_all_eight_features():
 
 
 def test_service_handle_window_grows_per_message():
-    """Two successive messages → window of 2 readings for that pump."""
+    """Two successive messages -> window of 2 readings for that pump."""
     cfg = _make_config()
     writer = FakeWriter()
     svc = ScorerService(cfg, writer)
@@ -151,7 +161,7 @@ def test_service_handle_parses_iso_ts():
 
 def test_service_handle_missing_field_skips_write():
     """A telemetry message missing one of the 4 raw fields is logged
-    and skipped — not raised. One bad message shouldn't kill the
+    and skipped -- not raised. One bad message shouldn't kill the
     service."""
     cfg = _make_config()
     writer = FakeWriter()
@@ -187,18 +197,94 @@ def test_service_handle_score_in_zero_one():
     assert 0.0 <= writer.rows[0].score <= 1.0
 
 
-def test_service_handle_psi_dict_present():
+def test_service_handle_psi_dict_present_when_compute_fires():
+    """On a compute tick (period_ticks=1 forces every-tick compute),
+    PSI is populated with all PSI_FEATURE_NAMES keys (4 per ADR 0009)."""
     cfg = _make_config()
     writer = FakeWriter()
-    svc = ScorerService(cfg, writer)
+    # Override: force PSI every tick so the single-message smoke
+    # path still exercises the populated branch.
+    svc = ScorerService(cfg, writer, psi_period_ticks=1)
 
     async def _go():
         await svc.handle("P-00", _telemetry())
 
     _run(_go())
     row = writer.rows[0]
-    # Stub returns all 8 PSI values
-    assert set(row.psi.keys()) == set(FEATURE_NAMES)
+    assert row.psi is not None
+    assert set(row.psi.keys()) == set(PSI_FEATURE_NAMES)
+
+
+def test_service_handle_psi_is_none_on_non_compute_ticks():
+    """With psi_period_ticks=3, only the 3rd-tick row carries PSI.
+    Ticks 1 and 2 write ``psi=None`` so InfluxDB stores nulls (ADR 0007
+    cadence rationale). PSI dict key set is PSI_FEATURE_NAMES per
+    ADR 0009."""
+    cfg = _make_config()
+    writer = FakeWriter()
+    svc = ScorerService(cfg, writer, psi_period_ticks=3)
+
+    async def _go():
+        for _ in range(3):
+            await svc.handle("P-00", _telemetry())
+
+    _run(_go())
+    assert len(writer.rows) == 3
+    assert writer.rows[0].psi is None, "tick 1: pre-compute"
+    assert writer.rows[1].psi is None, "tick 2: pre-compute"
+    assert writer.rows[2].psi is not None, "tick 3: compute boundary"
+    assert set(writer.rows[2].psi.keys()) == set(PSI_FEATURE_NAMES)
+
+
+def test_service_handle_psi_period_per_pump_isolated():
+    """Each pump has its own tick counter -- pump A's compute boundary
+    doesn't trigger PSI on pump B."""
+    cfg = _make_config()
+    writer = FakeWriter()
+    svc = ScorerService(cfg, writer, psi_period_ticks=2)
+
+    async def _go():
+        # P-00: 2 ticks (boundary fires on tick 2)
+        await svc.handle("P-00", _telemetry(pump_id="P-00"))
+        await svc.handle("P-00", _telemetry(pump_id="P-00"))
+        # P-01: 1 tick (no boundary yet)
+        await svc.handle("P-01", _telemetry(pump_id="P-01"))
+
+    _run(_go())
+    p00_rows = [r for r in writer.rows if r.pump_id == "P-00"]
+    p01_rows = [r for r in writer.rows if r.pump_id == "P-01"]
+    assert p00_rows[0].psi is None
+    assert p00_rows[1].psi is not None
+    assert p01_rows[0].psi is None
+
+
+def test_service_feature_history_size_tracks_per_pump():
+    """The PSI feature-history deque grows with each handle call and
+    is exposed via feature_history_size for the smoke test."""
+    cfg = _make_config()
+    writer = FakeWriter()
+    svc = ScorerService(cfg, writer, psi_period_ticks=10)
+
+    async def _go():
+        for _ in range(5):
+            await svc.handle("P-00", _telemetry())
+
+    _run(_go())
+    assert svc.feature_history_size("P-00") == 5
+    assert svc.feature_history_size("P-99") == 0  # never seen
+
+
+def test_service_psi_period_ticks_default_from_config():
+    """When psi_period_ticks is not explicitly passed, it derives from
+    ``config.psi_period_ticks`` = ceil(60s / tick_seconds)."""
+    cfg = _make_config(tick_seconds=2.0)  # -> 30 ticks default
+    writer = FakeWriter()
+    svc = ScorerService(cfg, writer)
+    assert svc.psi_period_ticks == 30
+
+    cfg2 = _make_config(tick_seconds=4.0)  # -> 15 ticks default
+    svc2 = ScorerService(cfg2, writer)
+    assert svc2.psi_period_ticks == 15
 
 
 def test_service_window_size_derived_from_config(_=None):
@@ -219,7 +305,7 @@ def test_mode_parity_uses_shared_features_module():
 
 
 def test_mode_parity_uses_shared_score_and_drift():
-    """Score and PSI must come from shared/ — Lambda will import the same."""
+    """Score and PSI must come from shared/ -- Lambda will import the same."""
     service = importlib.import_module("local_runtime.service")
     shared_score = importlib.import_module("shared.score")
     shared_drift = importlib.import_module("shared.drift")
@@ -228,7 +314,7 @@ def test_mode_parity_uses_shared_score_and_drift():
 
 
 def test_service_accepts_externally_supplied_window():
-    """Dependency-injectable window — needed for tests and for a future
+    """Dependency-injectable window -- needed for tests and for a future
     'replay from snapshot' tool."""
     cfg = _make_config()
     writer = FakeWriter()
@@ -253,7 +339,7 @@ def test_structural_parity_no_vendoring():
     extract_features being called from local_runtime.service must
     physically live in the repo's shared/ directory.
 
-    Per Gemini Q6 (2026-05-29 review) — uses `inspect.getfile` rather
+    Per Gemini Q6 (2026-05-29 review) -- uses `inspect.getfile` rather
     than relying on `sys.modules` identity.
     """
     import inspect
@@ -274,7 +360,7 @@ def test_structural_parity_no_vendoring():
 
 
 def test_structural_parity_score_loads_from_shared():
-    """Same check for shared.score.score — a vendored fork in
+    """Same check for shared.score.score -- a vendored fork in
     local_runtime/ would defeat mode parity even if the import is_
     check passes (because both sides could agree on the wrong copy)."""
     import inspect

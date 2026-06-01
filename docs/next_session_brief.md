@@ -1,53 +1,52 @@
-# Next session brief — AWS-IoT publisher
+# Next session — opening prompt
 
-Paste the block below at the start of the next conversation. The
-free-form notes section underneath is for the human reading — Claude
-gets only the fenced block.
+> Paste this as the FIRST message of the next session, after pasting the standard session brief.
 
-```
-Component: simulator
-Intent:    Implement AwsIotPublisher (mTLS via aiomqtt against AWS IoT Core), drop the Fleet.from_config reject for target=aws-iot, prove a single pump P-00 publishes to IoT Core end-to-end.
-Loads:     _global, simulator
-Reference: ADR 0003 (full doc + 2026-05-27 Addendum on Windows loop-factory), simulator/publisher.py::AwsIotPublisher stub, docs/sessions/2026-05-25-simulator-mqtt-publishing.md (incl. 2026-05-27 smoke-test footnote).
-Constraints:
-  - $0 AWS spend cap is hard (per ml-obs-pipeline-context). Provision Thing+cert+policy via Console, NOT Terraform — Terraform state on IoT is a follow-up.
-  - Region: eu-central-1 only.
-  - Shape-only TLS schema validation in load_config stays untouched (ADR 0003 §Decision 5). File-existence + cert-parsing live in AwsIotPublisher.__aenter__.
-  - Mode parity preserved: same Publisher ABC, same per-pump connection topology (one Thing = one client_id = one TCP connection).
-  - Windows: loop_factory=SelectorEventLoop is already wired in __main__.py — do not regress.
-Definition of done:
-  1. AWS IoT Thing "P-00" provisioned with attached cert + per-Thing policy (publish-only to factory/pumps/P-00/telemetry).
-  2. AwsIotPublisher.__aenter__ opens disk certs, configures aiomqtt's TLS, connects to the AWS IoT Core ATS endpoint, and publishes one real message visible in the IoT Core MQTT test client.
-  3. Fleet.from_config no longer rejects target=aws-iot; the publisher itself is the gate.
-  4. New tests cover the cert-loading code paths (existence checks, malformed-path rejection) by monkeypatching disk reads — do NOT pull real certs into the test tree.
-  5. ADR 0003 status of AwsIotPublisher updated from "stub" to "implemented" with a note pointing to the session log.
-  6. Smoke test rerun: a 2-pump fleet (P-00 = aws-iot, OR full fleet = aws-iot if cost permits) publishes to IoT Core, observed via the AWS console subscriber. Single-pump-only is fine if the cost math says so.
-```
+## Step 1 — Quiz first
 
-## Notes for the human
+Before writing any code, quiz me on essential project knowledge. Rules:
 
-**Why one pump, not the full fleet:** AWS IoT Core's per-message price is ~$1/million. 15 pumps × 0.5 Hz × 24 h = ~650k msg/day = ~$0.65/day. Within $0 only if the session is brief and the fleet is stopped. Single pump for the smoke test is the safer default; full-fleet runs are demos, not routine.
+- 10 questions total. Ask one at a time.
+- After each answer, tell me whether it's correct, partially correct, or wrong, and supply the right answer. Do not move to the next question until I respond.
+- Be strict on architectural / parity / cost questions; lenient on phrasing for definitions.
+- After all 10, give a total score (X/10) and a one-sentence summary: "context loaded clean" vs. "the following gaps surfaced: …".
+- Do NOT touch tools (Read, Edit, Bash, etc.) during the quiz — answer only from memory + the auto-loaded MEMORY.md / DEV_NORMS / `context/_global.md`. If I push back on a wrong-judgement, then verify against the repo.
 
-**Provisioning walkthrough — what to expect:**
-Phase A (~10 min, AWS Console): IoT Core > Manage > Things > Create > single Thing "P-00" > auto-generate cert > download cert + private key + AmazonRootCA1 + IoT endpoint. Save under `simulator/.secrets/P-00/` (already gitignored per `.gitignore` line "simulator/.secrets/").
-Phase B (~5 min): create per-Thing policy allowing iot:Connect with client_id P-00 + iot:Publish on the P-00 telemetry topic only. Attach to the cert.
-Phase C: smoke-test the cert with the AWS IoT MQTT test client (or `mosquitto_pub --cert ... --key ... --cafile ... --host ...`) BEFORE you put it through AwsIotPublisher — eliminates "is it the cert or is it the code" ambiguity.
+### The 10 questions (ask in this order)
 
-**Files that will likely change in this session:**
-- `simulator/publisher.py` — flesh out `AwsIotPublisher.__aenter__` / `publish` / `__aexit__`.
-- `simulator/runner.py` — drop the `target=aws-iot` reject in `Fleet.from_config`.
-- `simulator/tests/test_publisher.py` — add tests for cert-loading paths (monkeypatched).
-- `docs/adr/0003-asyncio-mqtt-per-pump-aiomqtt.md` — note implementation status.
-- `context/simulator.md` — tick the "AWS IoT path" box.
-- (probably) `.gitignore` — already excludes `simulator/.secrets/` and `*.pem` / `*.key` / `*.crt`. Verify cert filenames match.
+1. **Cost & guardrails.** What's the project's hard lifetime AWS spend ceiling, and what AWS service categories are on the never-deploy list? Why is each excluded?
 
-**What's NOT in scope for this session:**
-- Terraform-managing IoT Things/policies/certs (follow-up — too much surface for one session).
-- Switching from per-pump certs to a fleet-wide cert (premature; ADR 0003's per-pump decision should stand until we have actual reasons to change it).
-- The scenario runner (`seasonal_drift` etc.) — separate session.
-- Building a subscriber that does anything with the IoT-Core-side telemetry (lambda_scorer or local_runtime session).
+2. **North stars.** Name the six north stars from `context/_global.md`. Which one is the "if violated, treat as a bug" rule that drove ADR 0005?
 
-**Watch items:**
-- aiomqtt's TLS configuration interface — confirm shape against current docs before writing the code; v2.x reshuffled some kwargs from v1.
-- AWS IoT Core's "Send a test message" flow has changed twice in the last year. If the Console UI doesn't match what walkthroughs say, drop into Claude-in-Chrome to navigate it interactively.
-- Cost dashboard check at session end. The Budgets armed for `pdm-portfolio` will email at $1 / SMS at $5 — but eyeball the actual spend in Billing > Cost Explorer before declaring victory.
+3. **Tech locks.** Why was Timestream replaced with DynamoDB, and why was Kinesis Firehose replaced with a Lambda + EventBridge batcher? (Cost reason for each.)
+
+4. **Mode parity — semantics.** State the mode-parity invariant. Be precise about what it IS (output correctness under same inputs) and what it is NOT (concurrency model). Cite the source.
+
+5. **Mode parity — location.** Where does the parity-shared logic physically live in the repo? Name the three files and the package. Why isn't it under `lambda_scorer/` or `local_runtime/`? What does ADR 0005 say about the alternative layouts I considered?
+
+6. **The 8 features.** List the 8 features extracted by `shared.features.extract_features` (per PLAN.md §2.3). Which 4 are raw signals from the simulator? Which 2 rolling stats are computed, and over what window?
+
+7. **PSI thresholds.** What are the three PSI threshold bands (per PLAN.md §2.7) and what triggers an SNS alert?
+
+8. **Context-loading tiers.** Name all four tiers in DEV_NORMS §5. What specifically triggers Tier 2b loading? Which components are currently in the parity set?
+
+9. **MQTT topology.** Why does each pump get its own MQTT connection in the simulator (ADR 0003), and why does the local_runtime subscriber have just ONE connection on a wildcard topic (ADR 0005)? What's the asymmetry?
+
+10. **Current blockers.** What's the open HANDOFF.md §6 question that blocks the lambda_scorer session from starting? What's the open drift-session question that ADR 0005 surfaced during Gemini review?
+
+## Step 2 — Continue development
+
+After the quiz, ask me which component is next. Options on the table (in rough order of "most natural next step"):
+
+- **model** — implement `shared.score.score` with the real `HistGradientBoostingClassifier`. Removes a stub. Mode-parity safe by construction (interface locked).
+- **dashboards** — Grafana panels against the InfluxDB schema pinned by ADR 0005. Uses the data local_runtime is now writing live. Visible recruiter signal.
+- **drift** — implement `shared.drift.compute_psi` with real binned percentages + Laplace smoothing. Removes a stub. Resolves the PSI write-cadence open question.
+- **lambda_scorer** — BLOCKED on HANDOFF.md §6 Q5 (DynamoDB schema). Resolve Q5 first or pick another component.
+
+Once I pick, I'll write a session brief in the standard template (DEV_NORMS §5 Tier 2b applies to model/drift/dashboards/lambda_scorer — make sure `Loads:` includes `shared/` source + ADR 0005). You'll plan-then-approve before any code.
+
+## Reminder of process
+
+- Per DEV_NORMS §3: no code without an approved plan.
+- Per the parity-load check in auto-memory: if my brief is for a parity-touching component and omits Tier 2b loads, STOP and ask me to revise.
+- Per [[ml_obs_pipeline_git_on_windows]]: all git ops on my side (Windows).
