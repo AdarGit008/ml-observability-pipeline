@@ -1,14 +1,33 @@
-"""Tests for the shared.score and shared.drift stubs.
+"""Tests for the shared.score and shared.drift interface contracts.
 
-The stubs are interface-locks, not real implementations. These tests
-pin:
-- Score returns a float in [0, 1].
-- Score is deterministic for the same input.
-- Drift returns a dict with all 8 FEATURE_NAMES as keys, all floats.
-- Drift accepts an iterable of feature dicts (the rolling window form).
+History: file originated as "test the stubs return well-shaped values."
+The model session (2026-06-01) swapped ``shared.score.score`` from a
+deterministic stub to a HistGradientBoostingClassifier-backed
+implementation; the stub-specific clamp tests
+(``test_score_clamps_at_one``/``..._at_zero``) were removed since
+they pinned the ``clip(vibration_amp_mean_5m / 3.0, ...)`` math that
+no longer exists. The interface-contract tests below survive the
+swap — they're the per-call invariants the
+``local_runtime.service.ScorerService`` depends on.
 
-When the model + drift sessions land real implementations, these tests
-update with the actual semantics but the interface contracts stay.
+What this file does NOT cover:
+- Round-trip artifact integrity (``model/tests/test_train.py``).
+- Model load + validation errors (``model/tests/test_score_wiring.py``).
+- Structural mode-parity / inspect.getfile invariant
+  (``local_runtime/tests/test_service.py::test_structural_parity_*``).
+
+What this file pins for the live model:
+- ``score(features)`` returns a float in ``[0, 1]``.
+- ``score`` is deterministic for the same input (sklearn classifiers
+  are; if a future session swaps in a model with non-deterministic
+  scoring, this test fires).
+- A higher rolling vibration mean produces a higher score (the
+  minimum-signal sanity check — the real AUC ≥ 0.85 acceptance
+  criterion is enforced in ``model.train.main`` and re-checked in
+  ``model/tests/test_train.py``).
+
+PSI is still a stub; the drift session will rewrite this file's
+drift-side tests when it lands.
 """
 
 from __future__ import annotations
@@ -40,26 +59,22 @@ def test_score_returns_float_in_unit_interval():
 
 
 def test_score_is_deterministic():
+    """sklearn's predict_proba on a fitted classifier is deterministic;
+    a future session that swaps in a non-deterministic family (e.g.,
+    Monte-Carlo dropout) needs to either update this test with a
+    seeded variant or write the ADR justifying the change."""
     f = _features()
     assert score(f) == score(f)
 
 
 def test_score_increases_with_vibration_mean():
-    """Stub uses vibration_amp_mean_5m / 3.0 — higher mean → higher score."""
-    low = score(_features(vib_mean=0.1))
+    """A pre-failure pump has a noticeably higher rolling vibration
+    mean (~1.0+) than a healthy one (~0.3). The classifier MUST
+    rank the higher-vibration sample higher — anything else means
+    the model didn't learn the main physical signal."""
+    low = score(_features(vib_mean=0.3))
     high = score(_features(vib_mean=2.0))
     assert high > low
-
-
-def test_score_clamps_at_one():
-    """vibration_amp_mean_5m >= 3.0 → score = 1.0 (clamped)."""
-    assert score(_features(vib_mean=5.0)) == 1.0
-
-
-def test_score_clamps_at_zero():
-    """Negative vibration_amp_mean_5m (shouldn't happen physically, but
-    test the clamp anyway) → score = 0.0."""
-    assert score(_features(vib_mean=-1.0)) == 0.0
 
 
 def test_compute_psi_returns_dict_with_all_feature_keys():
@@ -82,7 +97,8 @@ def test_compute_psi_accepts_empty_window():
 def test_compute_psi_sentinels_span_warning_and_stable():
     """Stub returns values that exercise both threshold bands:
     vibration_amp in [0.10, 0.25] (warning), others < 0.10 (stable).
-    Pinned so downstream alert wiring has a known fixture."""
+    Pinned so downstream alert wiring has a known fixture. This test
+    goes away when the drift session lands real PSI."""
     psi = compute_psi([_features()], reference=None)
     assert 0.10 <= psi["vibration_amp"] < 0.25  # warning band
     for name in FEATURE_NAMES:
