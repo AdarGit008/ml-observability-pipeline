@@ -28,19 +28,51 @@ Published by simulator on the topic above.
 - Numeric fields are floats. RPM is float not int to preserve noise model.
 
 ## DynamoDB schema
-> **Open: HANDOFF.md §6 Q5.** Three options on the table. Decision needed before lambda_scorer work begins. Filled in here once locked.
+> **Resolved 2026-06-02 by ADR 0010.** Option A with a STATE-row sibling: one row per reading keyed `(pump_id, <ISO-8601 ts>)` for history, one row per pump keyed `(pump_id, "STATE")` for the latest snapshot. Two PutItems per scoring invocation; one BatchGetItem for fleet-wide latest snapshot.
 
-Tentative leader: `PK = pump_id`, `SK = timestamp` (one row per reading). Hot-pump fan-out is acceptable at 15 pumps × 30 msg/min.
+### Reading row
+```
+PK = pump_id            # "P-07"
+SK = <ISO-8601 ts>      # "2026-06-02T14:32:01.123Z"
+vibration_amp = <float>
+bearing_temp  = <float>
+motor_current = <float>
+rpm           = <float>
+score         = <float>  # P(failure_48h) ∈ [0, 1]
+```
+
+### STATE row
+```
+PK = pump_id
+SK = "STATE"
+latest_ts    = <ISO-8601 ts>
+latest_score = <float>
+# PSI follow-on adds:
+#   latest_psi  = { vibration_amp: float, bearing_temp: float, motor_current: float, rpm: float }
+#   alert_flag  = bool
+```
+
+### Access patterns
+
+| Pattern | Operation |
+|---|---|
+| Hot path: read rolling window | `Query(PK=pump_id, SK begins_with "2", Limit=150, ScanIndexForward=False)` then reverse |
+| Hot path: append reading | `PutItem` on the reading row |
+| Hot path: overwrite STATE | `PutItem` on the STATE row |
+| PSI follow-on: 1-hour window | Same `Query`, `Limit=1800` |
+| Dashboards: fleet latest | `BatchGetItem` across 15 STATE keys |
+
+The `SK begins_with "2"` predicate filters out the STATE row (ISO-8601 timestamps start with year digits; `"STATE"` starts with `S`). Reading PutItem + STATE PutItem are NOT issued via `TransactWriteItems` — see ADR 0010 §Item ordering for the rationale.
 
 ## Lambda scorer event envelope
 From IoT Rule trigger. Standard IoT message + rule metadata. The handler should treat the inner payload as the MQTT body above.
 
 ## Lambda scorer DynamoDB writes
-Per invocation:
-- Append new reading to the per-pump feature window.
-- Write `{score, psi_per_feature, alert_flag}` to a state record.
+Per invocation, MVP scope (PSI + alert deferred):
+- `PutItem` on the reading row `{PK=pump_id, SK=<ts>, telemetry…, score}`.
+- `PutItem` on the STATE row `{PK=pump_id, SK="STATE", latest_ts, latest_score}`.
 
-Exact key shape pending §6 Q5.
+PSI follow-on extends the STATE row write with `latest_psi` + `alert_flag` and adds an SNS publish branch on threshold breach. Reading-row schema unchanged.
 
 ## S3 archive layout
 ```
@@ -74,4 +106,4 @@ Published when PSI > 0.25 OR P(failure_48h) > 0.7.
 ```
 
 ## Grafana → DynamoDB adapter
-> **Open: HANDOFF.md §6 Q1.** Lambda Function URL + JSON datasource plugin is the leader. API contract TBD.
+> **Open: HANDOFF.md §6 Q1.** Lambda Function URL + JSON datasource plugin is the leader. API contract TBD. The adapter consumes STATE rows via `BatchGetItem` per `## DynamoDB schema` above — one call per panel refresh, fleet-wide latest snapshot.

@@ -2,7 +2,7 @@
 
 - **Status:** Proposed | Accepted | Superseded by ADR NNNN
 - **Date:** YYYY-MM-DD
-- **Deciders:** PO (Adar), Claude (architect), Gemini (reviewer)
+- **Deciders:** PO (Adar), Claude (architect), reviewer model (see ADR 0011 for which providers fill the slot; record the actual model in §References)
 
 ## Context
 What is the problem we're solving? What constraints are in play? Reference north stars from `context/_global.md` when relevant.

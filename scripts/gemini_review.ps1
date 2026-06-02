@@ -1,60 +1,95 @@
 <#
 .SYNOPSIS
-  Run a review packet through the Gemini API and write the response.
+  Run a review packet through an LLM API and write the response.
 
 .DESCRIPTION
-  Reads review_packets/<date>-<slug>.md, POSTs the contents to the Gemini
-  generateContent endpoint, writes the model's response to
+  Reads review_packets/<date>-<slug>.md, POSTs the contents to a model
+  provider's generate endpoint, writes the response to
   review_responses/<date>-<slug>.md as UTF-8.
+
+  Default: cascades through providers gemini -> openrouter -> groq ->
+  cerebras, picking the first one whose API key env var is set and
+  whose call succeeds. This protects against Gemini being out of
+  capacity (503) or out of credits (4xx). Each provider in the chain
+  uses its own free-tier-friendly default model unless overridden via
+  -Model (which applies only to the first provider tried).
 
   Bypasses the Gemini CLI deliberately. See docs/adr/0001-direct-gemini-api-for-reviews.md.
 
 .PARAMETER Slug
-  Packet slug — the part after the date. For
+  Packet slug -- the part after the date. For
   review_packets/2026-05-24-simulator-pump.md, pass "simulator-pump".
 
 .PARAMETER Model
-  Gemini model to use. Default: gemini-pro-latest (a moving alias —
-  always the current top-tier Pro). Fall back to gemini-flash-latest
-  if Pro is over capacity (503s) or for cheaper/faster reviews.
+  Model identifier to use for the FIRST provider tried. Subsequent
+  fallback providers use their own defaults (mixing model names
+  across providers doesn't work -- gemini-pro-latest is invalid for
+  Groq, llama-3.3-70b is invalid for Gemini). If you want a specific
+  model from a specific fallback, pair this with -Provider.
 
 .PARAMETER Date
   Date prefix of the packet file. When omitted, the script globs
-  review_packets/*-<slug>.md and picks the newest match (lexicographic
-  on YYYY-MM-DD == chronologically newest). Explicit -Date overrides
-  the auto-pick — useful when reviewing an older packet or when two
-  sessions share a slug. The 2026-05-28 update added the auto-pick
-  behavior; the today-only default broke when reviews lagged a day
-  behind the packet date (e.g. the 2026-05-27 aws-iot-publisher
-  packet reviewed on 2026-05-28).
+  review_packets/*-<slug>.md and picks the newest match.
+
+.PARAMETER Provider
+  auto (default)   : cascade gemini -> openrouter -> groq -> cerebras
+                     (skipping providers without an API key env var)
+  gemini           : Google Gemini only (no cascade)
+  openrouter       : OpenRouter only
+  groq             : Groq only
+  cerebras         : Cerebras only
+
+.PARAMETER DumpBody
+  Dump each provider's outbound request body to
+  review_responses/<date>-<slug>.<provider>.request.json for debugging.
 
 .EXAMPLE
   .\scripts\gemini_review.ps1 -Slug simulator-pump
+  # tries gemini, falls back through openrouter/groq/cerebras on failure
+
+.EXAMPLE
+  .\scripts\gemini_review.ps1 -Slug simulator-pump -Provider groq
 
 .EXAMPLE
   .\scripts\gemini_review.ps1 -Slug simulator-pump -Model gemini-2.5-flash
-
-.EXAMPLE
-  .\scripts\gemini_review.ps1 -Slug simulator-pump -Date 2026-05-24
+  # tries gemini with the explicit model; falls back if it fails
 
 .NOTES
-  Requires $env:GEMINI_API_KEY (get one at https://aistudio.google.com/apikey).
+  Required env vars per provider (set whichever you have):
+    GEMINI_API_KEY      https://aistudio.google.com/apikey
+    OPENROUTER_API_KEY  https://openrouter.ai/keys
+    GROQ_API_KEY        https://console.groq.com/keys
+    CEREBRAS_API_KEY    https://cloud.cerebras.ai/?tab=api-keys
 #>
 
 [CmdletBinding()]
 param(
   [Parameter(Mandatory = $true)][string]$Slug,
-  [string]$Model = "gemini-pro-latest",
+  [string]$Model,
   [string]$Date,
+  [ValidateSet("auto", "gemini", "openrouter", "groq", "cerebras")]
+  [string]$Provider = "auto",
   [switch]$DumpBody
 )
 
 $ErrorActionPreference = "Stop"
 
-# If -Date wasn't explicitly passed, find the newest packet for this slug.
-# PSBoundParameters.ContainsKey is the canonical "did the caller pass this
-# parameter" check — checking $Date for empty would also be true when the
-# user explicitly passed -Date "" (we want to error in that case, not glob).
+# --- Provider config map ---
+#
+# Each entry carries the free-tier-friendly default model and the env
+# var the script reads the API key from. The OpenAI-compatible
+# providers (openrouter/groq/cerebras) share one Invoke-OpenAICompat
+# helper; Gemini has its own native shape.
+
+$providers = [ordered]@{
+  gemini     = @{ DefaultModel = "gemini-pro-latest"; EnvVar = "GEMINI_API_KEY"; Endpoint = $null }
+  openrouter = @{ DefaultModel = "deepseek/deepseek-r1:free"; EnvVar = "OPENROUTER_API_KEY"; Endpoint = "https://openrouter.ai/api/v1/chat/completions" }
+  groq       = @{ DefaultModel = "llama-3.3-70b-versatile"; EnvVar = "GROQ_API_KEY"; Endpoint = "https://api.groq.com/openai/v1/chat/completions" }
+  cerebras   = @{ DefaultModel = "llama-3.3-70b"; EnvVar = "CEREBRAS_API_KEY"; Endpoint = "https://api.cerebras.ai/v1/chat/completions" }
+}
+
+# --- Packet auto-pick (unchanged from pre-cascade behavior) ---
+
 if (-not $PSBoundParameters.ContainsKey("Date")) {
   $candidates = Get-ChildItem -Path "review_packets" -Filter "*-$Slug.md" -ErrorAction SilentlyContinue |
                 Sort-Object Name -Descending
@@ -63,8 +98,6 @@ if (-not $PSBoundParameters.ContainsKey("Date")) {
     exit 1
   }
   $packet = $candidates[0].FullName
-  # Re-derive $Date from the picked filename so the response file matches
-  # the packet's date (and so -DumpBody lands at the same date prefix).
   $Date = $candidates[0].BaseName -replace "-$Slug$", ""
   Write-Host "Auto-selected packet: $($candidates[0].Name)" -ForegroundColor Cyan
 } else {
@@ -72,83 +105,168 @@ if (-not $PSBoundParameters.ContainsKey("Date")) {
 }
 $response = Join-Path "review_responses" "$Date-$Slug.md"
 
-if (-not (Test-Path $packet))      { Write-Error "Packet not found: $packet"; exit 1 }
-if (-not $env:GEMINI_API_KEY)      { Write-Error "GEMINI_API_KEY env var not set. Get one at https://aistudio.google.com/apikey"; exit 1 }
+if (-not (Test-Path $packet)) { Write-Error "Packet not found: $packet"; exit 1 }
 
-# Read the prompt via .NET with an explicit UTF-8 encoding. Without the
-# explicit encoding, Windows PowerShell 5.1 falls back to the system ANSI
-# codepage (Windows-1252) for files without a BOM, mojibake-ing em-dashes
-# and other non-ASCII characters. Also guarantees a bare System.String
-# (no PSObject wrapping that ConvertTo-Json might introspect).
+# Read prompt with explicit UTF-8 (Windows PowerShell 5.1 defaults to ANSI for BOM-less files).
 $prompt = [System.IO.File]::ReadAllText((Resolve-Path $packet).Path, [System.Text.Encoding]::UTF8)
 
-# JSON-escape the prompt using .NET, bypassing ConvertTo-Json entirely.
-# Earlier attempts using ConvertTo-Json on the nested string produced
-# "Starting an object on a scalar field" from the Gemini API — depth-N
-# serialization can treat the string as an object with Length/Chars
-# properties. HttpUtility.JavaScriptStringEncode returns a JSON-valid
-# string with surrounding quotes when the second arg is $true.
 Add-Type -AssemblyName System.Web
-$promptJson = [System.Web.HttpUtility]::JavaScriptStringEncode($prompt, $true)
-$body = '{"contents":[{"role":"user","parts":[{"text":' + $promptJson + '}]}]}'
 
-if ($DumpBody) {
-  # Resolve to absolute path: .NET's File.WriteAllText uses [Environment]::CurrentDirectory,
-  # which is NOT the same as PowerShell's $PWD. Without this, dumps land in the user's
-  # home dir even when the shell is sitting in the project root.
-  $dir = Join-Path $PWD "review_responses"
-  if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
-  $dumpPath = Join-Path $dir "$Date-$Slug.request.json"
-  [System.IO.File]::WriteAllText($dumpPath, $body, [System.Text.UTF8Encoding]::new($false))
-  Write-Host "Request body dumped to $dumpPath ($($body.Length) chars)"
-}
+# --- Provider invocation helpers ---
+#
+# Each helper throws on failure (after printing the API's error body
+# to the console). The outer cascade catches and moves to the next
+# provider. Successful return: the response text as a [string].
 
-$uri = "https://generativelanguage.googleapis.com/v1beta/models/${Model}:generateContent?key=$env:GEMINI_API_KEY"
+function Invoke-Gemini {
+  param([string]$Model, [string]$Key, [string]$Prompt, [string]$DumpPath)
 
-try {
-  # Convert body to UTF-8 bytes BEFORE handing to Invoke-RestMethod. In
-  # Windows PowerShell 5.1, IRM with a string -Body can re-encode as
-  # ASCII regardless of the charset declared in Content-Type, mangling
-  # any non-ASCII characters in transit. Bytes bypass the re-encoding.
-  $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
-  $r = Invoke-RestMethod -Method Post -Uri $uri -ContentType "application/json; charset=utf-8" -Body $bodyBytes
-}
-catch {
-  # Surface Gemini's actual error body, not just the HTTP status line.
-  # PS 7+ exposes it as $_.ErrorDetails.Message; PS 5.1 needs the response stream.
-  $apiError = $null
-  if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
-    $apiError = $_.ErrorDetails.Message
+  $promptJson = [System.Web.HttpUtility]::JavaScriptStringEncode($Prompt, $true)
+  $body = '{"contents":[{"role":"user","parts":[{"text":' + $promptJson + '}]}]}'
+
+  if ($DumpPath) {
+    [System.IO.File]::WriteAllText($DumpPath, $body, [System.Text.UTF8Encoding]::new($false))
+    Write-Host "[gemini] request body dumped to $DumpPath ($($body.Length) chars)" -ForegroundColor DarkGray
   }
-  elseif ($_.Exception.Response) {
+
+  $uri = "https://generativelanguage.googleapis.com/v1beta/models/${Model}:generateContent?key=$Key"
+  $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
+
+  try {
+    $r = Invoke-RestMethod -Method Post -Uri $uri -ContentType "application/json; charset=utf-8" -Body $bodyBytes
+  } catch {
+    Write-ApiError -ProviderName "gemini" -Uri ($uri -replace 'key=[^&]+','key=<redacted>') -Err $_
+    throw
+  }
+
+  $text = $r.candidates[0].content.parts[0].text
+  if (-not $text) { throw "[gemini] empty response. Raw: $($r | ConvertTo-Json -Depth 10)" }
+  return $text
+}
+
+function Invoke-OpenAICompat {
+  param([string]$ProviderName, [string]$Endpoint, [string]$Model, [string]$Key, [string]$Prompt, [string]$DumpPath)
+
+  $promptJson = [System.Web.HttpUtility]::JavaScriptStringEncode($Prompt, $true)
+  $modelJson = [System.Web.HttpUtility]::JavaScriptStringEncode($Model, $true)
+  # OpenAI-compatible chat completions shape. temperature defaults are
+  # fine for review prompts; max_tokens unset = provider default
+  # (usually generous on free tiers).
+  $body = '{"model":' + $modelJson + ',"messages":[{"role":"user","content":' + $promptJson + '}]}'
+
+  if ($DumpPath) {
+    [System.IO.File]::WriteAllText($DumpPath, $body, [System.Text.UTF8Encoding]::new($false))
+    Write-Host "[$ProviderName] request body dumped to $DumpPath ($($body.Length) chars)" -ForegroundColor DarkGray
+  }
+
+  $headers = @{
+    "Authorization" = "Bearer $Key"
+    "Content-Type"  = "application/json; charset=utf-8"
+  }
+  # OpenRouter recommends an HTTP-Referer for free-tier rate-limit
+  # heuristics; the value doesn't have to resolve. Skipping it doesn't
+  # error but can lower priority.
+  if ($ProviderName -eq "openrouter") {
+    $headers["HTTP-Referer"] = "https://github.com/local-ml-obs-pipeline"
+    $headers["X-Title"]      = "ML Observability Pipeline review"
+  }
+
+  $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
+
+  try {
+    $r = Invoke-RestMethod -Method Post -Uri $Endpoint -Headers $headers -Body $bodyBytes
+  } catch {
+    Write-ApiError -ProviderName $ProviderName -Uri $Endpoint -Err $_
+    throw
+  }
+
+  $text = $r.choices[0].message.content
+  if (-not $text) { throw "[$ProviderName] empty response. Raw: $($r | ConvertTo-Json -Depth 10)" }
+  return $text
+}
+
+function Write-ApiError {
+  param([string]$ProviderName, [string]$Uri, $Err)
+
+  $apiError = $null
+  if ($Err.ErrorDetails -and $Err.ErrorDetails.Message) {
+    $apiError = $Err.ErrorDetails.Message
+  } elseif ($Err.Exception.Response) {
     try {
-      $stream = $_.Exception.Response.GetResponseStream()
+      $stream = $Err.Exception.Response.GetResponseStream()
       $reader = New-Object System.IO.StreamReader($stream)
       $apiError = $reader.ReadToEnd()
       $reader.Close()
     } catch { }
   }
 
-  Write-Host "Request was POST $($uri -replace 'key=[^&]+','key=<redacted>')" -ForegroundColor Yellow
-  Write-Host "HTTP status: $($_.Exception.Message)" -ForegroundColor Yellow
+  Write-Host "[$ProviderName] POST $Uri" -ForegroundColor Yellow
+  Write-Host "[$ProviderName] HTTP status: $($Err.Exception.Message)" -ForegroundColor Yellow
   if ($apiError) {
-    Write-Host "API response body:" -ForegroundColor Yellow
+    Write-Host "[$ProviderName] API response body:" -ForegroundColor Yellow
     Write-Host $apiError
   }
-
-  Write-Error "Gemini API call failed."
-  if ($Model -like "*pro*" -and ($apiError -match "UNAVAILABLE|high demand" -or "$_" -match "503")) {
-    Write-Host "Pro is over capacity. Retry with: .\scripts\gemini_review.ps1 -Slug $Slug -Model gemini-flash-latest"
-  }
-  exit 1
 }
 
-$text = $r.candidates[0].content.parts[0].text
-if (-not $text) { Write-Error "Empty response from Gemini. Raw response: $($r | ConvertTo-Json -Depth 10)"; exit 1 }
+# --- Cascade ---
 
-# Ensure target dir exists.
+if ($Provider -eq "auto") {
+  $chain = @($providers.Keys)
+} else {
+  $chain = @($Provider)
+}
+
 $dir = Split-Path $response -Parent
 if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
 
-$text | Out-File -Encoding utf8 $response
-Write-Host "Wrote $response ($($text.Length) chars, model=$Model)"
+$responseText = $null
+$usedProvider = $null
+$usedModel = $null
+
+foreach ($p in $chain) {
+  $cfg = $providers[$p]
+  $key = [Environment]::GetEnvironmentVariable($cfg.EnvVar, "User")
+  if (-not $key) { $key = [Environment]::GetEnvironmentVariable($cfg.EnvVar, "Process") }
+  if (-not $key) {
+    Write-Host "[$p] skipped -- $($cfg.EnvVar) env var not set" -ForegroundColor DarkGray
+    continue
+  }
+
+  # -Model applies only to the FIRST provider tried (avoids the
+  # cross-provider model-name mismatch). Subsequent providers use
+  # their own free-tier defaults.
+  $effectiveModel = if ($Model -and $p -eq $chain[0]) { $Model } else { $cfg.DefaultModel }
+
+  $dumpPath = if ($DumpBody) {
+    Join-Path $dir "$Date-$Slug.$p.request.json"
+  } else { $null }
+
+  Write-Host "[$p] trying model=$effectiveModel..." -ForegroundColor Cyan
+
+  try {
+    if ($p -eq "gemini") {
+      $responseText = Invoke-Gemini -Model $effectiveModel -Key $key -Prompt $prompt -DumpPath $dumpPath
+    } else {
+      $responseText = Invoke-OpenAICompat -ProviderName $p -Endpoint $cfg.Endpoint -Model $effectiveModel -Key $key -Prompt $prompt -DumpPath $dumpPath
+    }
+    $usedProvider = $p
+    $usedModel = $effectiveModel
+    break
+  } catch {
+    Write-Host "[$p] failed; moving on to next provider in chain" -ForegroundColor Yellow
+    continue
+  }
+}
+
+if (-not $responseText) {
+  $checked = ($chain | ForEach-Object { "$($_) ($($providers[$_].EnvVar))" }) -join ", "
+  Write-Error "All providers exhausted. Tried: $checked. Set at least one API key env var or wait for capacity."
+  exit 1
+}
+
+# --- Write response with provenance footer ---
+
+$footer = "`n`n---`n_Generated by **$usedProvider** (``$usedModel``) on $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')._`n"
+($responseText + $footer) | Out-File -Encoding utf8 $response
+
+Write-Host "Wrote $response ($($responseText.Length) chars, provider=$usedProvider, model=$usedModel)" -ForegroundColor Green

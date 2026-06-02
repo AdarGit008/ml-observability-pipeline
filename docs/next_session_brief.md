@@ -1,132 +1,139 @@
-# Next session brief — lambda_scorer MVP: cold-start + per-pump score path (+ resolve §6 Q5 at plan-step)
+Next session brief — lambda_scorer PSI follow-on (compute_psi + SNS publish + STATE-row extension)
 
-## Goal
+Goal
+Pick up the lambda_scorer thread where the 2026-06-02 MVP session closed. Add the deferred PSI compute + SNS publish path: widen the score-path DynamoDB read to the 1-hour PSI window, call `shared.drift.compute_psi(window, REFERENCE)` against the cold-start-loaded reference, extend the STATE-row PutItem with `latest_psi` (4-key dict per ADR 0009) + `alert_flag`, and publish to SNS on threshold breach per `_interfaces.md §SNS alert payload`. Schema is additive only — no DynamoDB migration; the ADR 0010 contract carries this session unchanged.
 
-Stand up the `lambda_scorer/` module's MVP: cold-start path that loads the bundled model + operational PSI reference, hot path that handles one IoT-Rule-delivered MQTT message per invocation (parse → fetch per-pump feature window from DynamoDB → append + extract features → score → write state record). Resolve HANDOFF.md §6 Q5 (DynamoDB schema) at plan-step — `context/lambda_scorer.md` §Open questions still lists Q5 as the blocking decision. PSI and SNS deferred to a follow-on session unless plan-step says otherwise.
+After this session, the AWS-mode hot path is feature-complete except for the dashboards adapter (Grafana → DynamoDB) and the IaC (Terraform module for the table, SNS topic, IoT Rule, IAM).
 
-After this session, the AWS-mode scoring path is wired end-to-end except for drift detection (PSI) and alerting (SNS), which carry into the next lambda_scorer session.
+How to start this session — plain-language walkthrough FIRST
+Same rule as 2026-06-02. Claude walks PO through the open Qs + the MVP-to-PSI scope delta + the SNS-topic-ARN env-var addition in plain language BEFORE any code. ONE paragraph each.
 
-## How to start this session — plain-language walkthrough FIRST
+If anything in the in-scope items below has changed meaning since the brief was written (e.g., the STATE-row attribute names need adjustment, a Q resolution turned out wrong), say so before greenlight.
 
-Same rule. Claude walks PO through Q5 + the MVP scope + the deploy-zip recipe in plain language BEFORE any code. ONE paragraph each.
+In-scope items (in order)
 
-If anything in the in-scope items below has changed meaning since the brief was written (e.g., a Q5 option went stale, the operational reference shape changed), say so before greenlight.
+Item 1 — Resolve the PSI-window query shape
+What changes: the hot-path DynamoDB read goes from `Limit=150` (5-minute scoring window) to needing BOTH a scoring window AND a 1-hour PSI window. Two shapes on the table per ADR 0010's forward commitment:
 
-## In-scope items (in order)
+* (A) Single `Query` with `Limit=1800`; slice the last 150 in-handler for `extract_features` and pass the full 1800 to `compute_psi`. Cheapest: one DynamoDB read per invocation. Pays for the 1800-row payload on every call even though scoring only needs the most recent 150.
+* (B) Two `Query` calls (`Limit=150` for scoring, `Limit=1800` for PSI). Double the DynamoDB read count per invocation. Conceptually cleaner; aligns with how `local_runtime/service.py` keeps the two windows distinct (5-min `FeatureWindow` deque + 1-hour feature-history deque).
 
-### Item 1 — Resolve HANDOFF.md §6 Q5 (DynamoDB schema)
+Claude's leaning at plan-step: **(A) single query**. At ~15 pumps × ~0.5 RPS, the marginal read-unit cost is invisible; the simpler control flow + halved DynamoDB latency contribution to cold-start-after-reload wins. PO call.
 
-What changes: pick one of the three options the §6 Q5 footprint lists (or a refinement), document access patterns explicitly, capture as either a session-log decision OR a new ADR 0010 if structurally novel (recommendation: ADR 0010 — this is the project's first DynamoDB schema decision and sticks for the project's lifetime). `context/_interfaces.md` §"DynamoDB schema" gets filled in from TBD to the resolution.
+PSI cadence: ADR 0007 specifies every-Nth-tick (default N=30 ticks = once per minute at 2 s tick). Lambda hot path doesn't have a tick counter the same way `local_runtime/service.py` does (one process holding state) — each invocation is independent. Two options:
 
-Three options on the table per HANDOFF.md §6 Q5:
-- **A.** `PK = pump_id, SK = timestamp` (one row per reading; hot-pump fan-out is wide; simplest access pattern)
-- **B.** `PK = pump_id#bucket(1min), SK = timestamp` (better partition dispersion + locality but query complexity grows)
-- **C.** `PK = pump_id, SK = state` (single mutable row per pump; loses raw-reading history; cheapest writes)
+* (a) Compute PSI on every invocation (~30/min/pump = 450 PSI computes/min across the fleet). Same `compute_psi` call shape as `local_runtime`, no cadence logic in the handler.
+* (b) Use the DynamoDB-stored `latest_ts` on the STATE row as a poor man's cadence — only compute PSI if `(new_ts - state.latest_ts) > 60 s`. Reduces PSI compute volume at the cost of one extra GetItem + an `if` branch.
 
-Claude's leaning at plan-step: **A** for MVP simplicity (15 pumps × 30 msg/min = 450 RPS at most — well inside DynamoDB's per-partition 1000 WCU floor; "hot pump fan-out" isn't a real problem at this fleet size). Option B is over-engineering for the demo scale. Option C drops the rolling-window source-of-truth.
+Claude's leaning: **(a) every-invocation compute**. PSI on a 1800-sample window is ~2 ms of numpy work; running it 450 times/min is free CPU. The cadence in `local_runtime` exists to throttle InfluxDB writes (PSI value lands as fields on a point), NOT because the computation is expensive. In Lambda the throttle isn't needed.
 
-Open at plan-step: does the rolling 1-hour PSI window live in DynamoDB (read-path each invocation) or in-process memory (cold-start cache)? The latter forces the Lambda to re-warm on every cold start; the former adds a query per invocation. PO call.
+Item 2 — STATE-row schema extension
+New attributes on the STATE row (per ADR 0010's pre-authorized extension):
 
-### Item 2 — `lambda_scorer/` scaffold
+```
+PK = pump_id
+SK = "STATE"
+latest_ts    = <ISO-8601 ts>      # unchanged from MVP
+latest_score = <Decimal>          # unchanged from MVP
+latest_psi   = {                  # NEW: 4-key dict per ADR 0009
+  "vibration_amp": <Decimal>,
+  "bearing_temp":  <Decimal>,
+  "motor_current": <Decimal>,
+  "rpm":           <Decimal>
+}
+alert_flag   = <bool>             # NEW: convenience flag for the dashboards adapter
+```
 
-Create `lambda_scorer/__init__.py`, `lambda_scorer/handler.py`, `lambda_scorer/tests/__init__.py`, `lambda_scorer/tests/test_handler.py`. Pattern mirrors `local_runtime/` — same import-from-shared discipline.
+`latest_psi` lands as a DynamoDB Map (`M`). The `_to_decimal` helper from MVP applies per-value. `alert_flag` is the OR of (`max(psi.values()) > 0.25`) and (`latest_score > 0.7`) per `_interfaces.md §SNS alert payload`.
 
-### Item 3 — Cold-start handler
+Update `context/_interfaces.md §DynamoDB schema` STATE row block: remove the "(PSI follow-on adds)" comment, land the attributes as committed. ADR 0010 stays unedited (it's the load-bearing schema decision; the extension was pre-authorized in §Decision #1 §Reading row + §STATE row blocks).
 
-Top-level module loads (run once per container, not per invocation):
-- Bundled `model/artifacts/model.pkl` via `shared.score` (already importable as peer per ADR 0005)
-- Bundled `model/artifacts/operational_reference_distribution.json` via `shared.drift.load_reference()` — version-match against the model bundle, raises `DriftError` on desync (ADR 0007)
-- DynamoDB resource client (`boto3.resource('dynamodb')`)
+Item 3 — SNS publish branch
+New module-level cold-start state:
 
-Per `context/lambda_scorer.md` §Resource sizing: 512 MB memory ceiling; bundled-pickle deploy zip per HANDOFF §6 Q3 default. Cold-start latency target: <2 s per `context/lambda_scorer.md` §Open questions (if exceeded, switch to S3 cold-load — but measure first).
+```python
+SNS_TOPIC_ARN = os.environ["SNS_TOPIC_ARN"]    # required; KeyError on cold-start if unset
+_SNS = boto3.client("sns", region_name=AWS_REGION)
+```
 
-### Item 4 — Hot-path handler
+Hot path adds an SNS publish AFTER the STATE-row write, gated on `alert_flag`. Payload shape per `_interfaces.md §SNS alert payload`:
 
-Per invocation:
-1. Parse IoT Rule event envelope → extract `pump_id`, `ts`, raw telemetry per `context/_interfaces.md` §Telemetry payload.
-2. Fetch per-pump feature window from DynamoDB (shape depends on Item 1 resolution).
-3. Append latest reading to the window (preserve 150-sample rolling cap per `shared.features.extract_features` window semantics).
-4. Call `shared.features.extract_features(window)` → 8-feature dict.
-5. Call `shared.score.score(features)` → P(failure_48h) ∈ [0, 1].
-6. Write state record: `{pump_id, ts, score}` (PSI + alert deferred to follow-on session unless scope expands at plan-step).
+```python
+{
+  "pump_id":    pump_id,
+  "ts":         ts,
+  "alert_type": "both" | "psi_breach" | "high_failure_prob",
+  "score":      float(score_value),
+  "psi":        {name: float(v) for name, v in psi.items()}
+}
+```
 
-### Item 5 — Structural-parity guard
+Open question — alert dedupe: if PSI > 0.25 persists, do we publish on every invocation (= 30 alerts/min/pump = noise) or use the previous `alert_flag` to suppress duplicates? Two options:
+* Edge-trigger: only publish when `alert_flag` flips from False → True. Requires reading the previous STATE row's `alert_flag` (one extra GetItem OR fold it into the existing window Query).
+* Always-publish: every invocation that breaches publishes. Downstream (SNS email subscription) handles dedupe via per-day-per-pump throttling rules at the SNS topic level.
 
-Add `test_structural_parity_lambda_scorer_imports_from_shared` to `lambda_scorer/tests/test_handler.py` mirroring the three local_runtime guards:
-- `lambda_scorer.handler` imports `shared.score.score` (not a vendored copy)
-- `lambda_scorer.handler` imports `shared.drift.load_reference` (not a vendored copy)
-- `lambda_scorer.handler` imports `shared.features.extract_features` (not a vendored copy)
+Claude's leaning: **edge-trigger** because SNS Always-Free is 1000 email deliveries/month and 13.5K invocations/demo × any reasonable demo scenario would burn through that fast. PO call.
 
-Per ADR 0005's parity-vendoring guard pattern.
+Item 4 — Tests with `moto`
+Add 3-4 new tests to `lambda_scorer/tests/test_handler.py`. Coverage:
 
-### Item 6 — Tests with `moto`
+* PSI-on-warm-window happy path: seed 1800 readings, invoke, verify `latest_psi` lands on STATE row + value set is `PSI_FEATURE_NAMES` (4 keys).
+* PSI surface stays at 4 keys: pin `set(latest_psi.keys()) == set(PSI_FEATURE_NAMES)` per ADR 0009.
+* SNS publish on threshold breach: seed readings that drive PSI > 0.25 OR force a score > 0.7, invoke, verify `_SNS.publish` was called with the expected payload (moto provides `@mock_aws` for SNS too — same context manager covers both).
+* SNS no-publish on healthy: `alert_flag == False`, no SNS call.
+* (If edge-trigger lands) SNS no-publish on still-breached: second consecutive breach invocation does NOT re-publish.
 
-Use `moto` to mock DynamoDB. No real AWS calls in tests. Cover:
-- Cold-start happy path (model + reference load clean, version match OK)
-- Cold-start version mismatch (`DriftError` raised)
-- Hot-path happy path (event → window read → score → state write)
-- Hot-path malformed event (missing pump_id, missing telemetry field)
-- Hot-path version drift since cold-start (re-validate or assume cold-start frozen? plan-step call)
-
-## Component
-
-`lambda_scorer` — **Tier 2b parity-touching** (imports `shared/features.py + shared/score.py + shared/drift.py`). See [[ml_obs_pipeline_shared_parity_boundary]] — the contract stays at `FEATURE_NAMES` (8) + `PSI_FEATURE_NAMES` (4). No parity-boundary edits this session unless plan-step surfaces a gap.
+Component
+`lambda_scorer` — Tier 2b parity-touching (imports `shared/features.py + shared/score.py + shared/drift.py`, including `compute_psi` for the first time in Lambda mode). See [[ml_obs_pipeline_shared_parity_boundary]] — the contract stays at `FEATURE_NAMES` (8) + `PSI_FEATURE_NAMES` (4). No parity-boundary edits this session unless plan-step surfaces a gap.
 
 [[ml_obs_pipeline_parity_load_check]] applies — STOP if any Tier 2b load is missing from this brief.
 
-## Loads
+Loads
+* Tier 1: `context/_global.md`, `context/_interfaces.md`.
+* Tier 2: `context/lambda_scorer.md`.
+* Tier 2b parity: `shared/{features,score,drift}.py` (all three) + ADR 0005.
+* Cross-component: `context/drift.md` (PSI cadence + thresholds), `local_runtime/service.py` (the structural cousin — `_feature_history` deque + every-Nth-tick PSI is the local-mode equivalent of what we're building in Lambda).
+* ADRs: 0005 (parity boundary), 0007 (PSI cadence + load_reference contract), 0008 (operational reference — already loaded at cold-start), 0009 (PSI surface = 4 features), 0010 (DynamoDB schema; Item 2's STATE-row extension is pre-authorized in §Decision and §Item ordering), 0011 (review cascade — applies to this session's review packet).
+* Memory: [[ml_obs_pipeline_shared_parity_boundary]], [[ml_obs_pipeline_parity_load_check]], [[ml_obs_pipeline_fuse_write_truncation]] (default to outputs/cp regardless of file size), [[ml_obs_pipeline_git_on_windows]].
 
-- **Tier 1:** `context/_global.md`, `context/_interfaces.md`.
-- **Tier 2:** `context/lambda_scorer.md`.
-- **Tier 2b parity:** `shared/{features,score,drift}.py` (all three) + ADR 0005.
-- **Cross-component:** `context/model.md` (the model bundle Claude is loading), `context/drift.md` (the reference Claude is loading).
-- **ADRs:** 0005 (parity boundary), 0006 §Footprint (deploy-zip footprint measurement — ~124 MB unzipped, Lambda 250 MB unzipped ceiling, ~50% headroom), 0007 (PSI cadence + load_reference contract), 0008 (operational reference), 0009 (PSI surface ≠ scorer feature set).
-- **Open question being resolved:** HANDOFF.md §6 Q5 (DynamoDB schema).
-- **Memory:** [[ml_obs_pipeline_shared_parity_boundary]], [[ml_obs_pipeline_parity_load_check]], [[ml_obs_pipeline_fuse_write_truncation]] (default to outputs/cp regardless of file size, per 2026-06-04 update), [[ml_obs_pipeline_git_on_windows]].
+Reference
+* `HANDOFF.md §6 Q3` (model packaging — bundled default; affects cold-start size if SNS client adds meaningful weight), §6 Q4 (reference storage — bundled by default).
+* `context/_interfaces.md §SNS alert payload` — the wire format the publish branch produces.
+* `context/_interfaces.md §PSI parameters` — thresholds 0.10 / 0.25.
+* `context/lambda_scorer.md` — §Open questions to close (cold-start latency measurement still deferred; PSI follow-on closes everything else).
+* `shared/drift.py::compute_psi` — the function being called. Pure: no I/O, no module-level state. Reference is passed explicitly.
+* `local_runtime/service.py` — mode-parity cousin. Same `compute_psi(list(feat_hist), reference=self._reference)` call shape; the only difference is where the window comes from (DynamoDB Query vs in-memory deque).
+* `docs/sessions/2026-06-02-lambda_scorer-mvp.md` §"Open follow-ups" — the close-out list this session works through.
 
-## Reference
+Constraints
+* FUSE write truncation (per [[ml_obs_pipeline_fuse_write_truncation]] 2026-06-04 update). Default to outputs/cp regardless of file size.
+* Parity boundary unchanged. `shared/{features,score,drift}.py` stays at the locked contract. No edits there this session.
+* Bash 45 s cap. No long-running training; use `moto` for all AWS mocks, no real AWS calls. moto's `@mock_aws` covers SNS as well as DynamoDB — one context manager.
+* Lambda 512 MB memory + 250 MB unzipped deploy zip. boto3.client("sns") is the same boto3 already in the deploy zip — no new heavyweight dep.
+* No real AWS spend. All tests run against `moto`.
+* PO does git on Windows per [[ml_obs_pipeline_git_on_windows]]. Commit drafts include the canonical PowerShell sequence per DEV_NORMS §7.
+* **Reviewer-model loop (ADR 0011) applies to this session's review.** When the packet is ready, `.\scripts\gemini_review.ps1 -Slug <slug>` cycles through gemini → openrouter → groq → cerebras; weight the response against the provenance-footer's named provider per ADR 0011 §Consequences.
+* Test count baseline: 361 passed + 1 skipped (post-2026-06-02). Expect net delta of +3 to +5 tests from Item 4.
 
-- `HANDOFF.md` §6 Q3 (model packaging — bundled default), §6 Q4 (reference storage — bundled by default; the artifact name is `operational_reference_distribution.json` post-ADR-0008), §6 Q5 (DynamoDB schema — being resolved this session).
-- `context/_interfaces.md` §"DynamoDB schema" (TBD → gets filled in), §"Lambda scorer event envelope", §"Lambda scorer DynamoDB writes".
-- `context/lambda_scorer.md` (purpose, interfaces, resource sizing, open questions).
-- `model/artifacts/README.md` §"Two pump counts, two purposes" — the operational reference is invariant under `--n-pumps` (15 pumps × 1800 ticks = 27 000 samples post-Item-3 of the 2026-06-04 session).
-- `shared/drift.py::load_reference` — exact validation behaviour for the cold-start path (4-element `feature_names`, `model_version` match against `model.pkl`, lazy-imported joblib in the version-check branch).
-- `local_runtime/service.py` — the structural cousin Claude is mirroring (same cold-start pattern, different runtime).
-- `docs/sessions/2026-06-04-followup-items-3-4-5-7.md` §"Gemini review highlights" — read the disagreement-recorded Q1 (5→15 bump as session-log note) before touching `OPERATIONAL_REFERENCE_PUMPS`.
+Definition of done
+* ✅ Item 1 query shape decision captured as a session-log note OR (if structurally novel — e.g. introducing a GetItem-then-Query pattern) ADR 0012.
+* ✅ Item 2 STATE-row attributes land in code + `context/_interfaces.md` updated.
+* ✅ Item 3 SNS publish wired with edge-trigger semantics (assuming PO greenlights) + `SNS_TOPIC_ARN` env var documented in `context/lambda_scorer.md` §Environment variables.
+* ✅ Item 4 tests added; suite passes 361 + N where N is the Item 4 test count.
+* ✅ Structural-parity tests stay green (`compute_psi` joins the trio of shared-imports guarded by structural-parity tests; add a fourth guard mirroring the existing three).
+* ✅ Deploy-zip footprint verified ≤ ADR 0006 §Q4's ~124 MB unzipped baseline (boto3 already counted; SNS adds no new dep).
+* ✅ Session log + review packet written. The reviewer-model cascade runs the review per ADR 0011; the response file's provenance footer should now render correctly (post-2026-06-02 footer escape fix).
+* ⏳ Carry-forward: cold-start latency measurement post-deploy (`context/lambda_scorer.md` §Open questions); Terraform IaC for the DynamoDB table + SNS topic + IoT Rule + IAM (separate IaC session).
 
-## Constraints
+Open questions to raise with PO at plan-step
 
-- **FUSE write truncation** (per [[ml_obs_pipeline_fuse_write_truncation]] 2026-06-04 update). Default to outputs/cp regardless of file size — even 76-line files have been hit. `Edit` is only safe for single-call edits to files under ~50 lines.
-- **Parity boundary unchanged.** `shared/{features,score,drift}.py` stays at the locked contract. No edits there this session.
-- **Bash 45 s cap.** No long-running training; use `moto` for all AWS mocks, no real AWS calls.
-- **Lambda 512 MB memory + 250 MB unzipped deploy zip.** ADR 0006 §Footprint measured ~124 MB; bundling stays viable. Verify zip size at session close.
-- **No real AWS spend.** All tests run against `moto`. No `aws sdk` calls outside of mocked test paths.
-- **PO does git on Windows** per [[ml_obs_pipeline_git_on_windows]]. Commit drafts include the canonical PowerShell sequence per DEV_NORMS §7 (new 2026-06-04 norm).
-- **Test count baseline: 350 passed + 1 skipped (post-2026-06-04).** Expect net delta = +N (Item 6's test additions). Structural-parity tests must stay green.
+1. **Query shape (Item 1):** single Query Limit=1800 vs two Queries (150 + 1800). Claude's lean: single. PO call.
+2. **PSI cadence (Item 1):** every-invocation compute vs `latest_ts`-gated. Claude's lean: every-invocation. PO call.
+3. **Alert dedupe (Item 3):** edge-trigger vs always-publish. Claude's lean: edge-trigger to protect the SNS Always-Free 1000-email/month envelope. PO call.
+4. **`alert_flag` semantics on the STATE row:** is it the CURRENT-invocation breach state (overwrites every invocation) or the LAST-PUBLISHED state (used by the edge-trigger)? Affects the dashboards adapter — the panel that lights up red wants current-state, while the edge-trigger wants last-published. Could be two separate attributes (`is_breach_now`, `last_alert_sent_at`).
+5. **Session log / ADR shape:** if Item 1's query-shape decision is "single Query Limit=1800", it's a refinement within ADR 0010 (session-log note). If we end up with the GetItem-before-Query pattern for edge-trigger, that's structurally novel — ADR 0012 territory. Decide at plan-step based on which way Items 1 and 3 resolve.
 
-## Definition of done
+Tone note for the session
+The 2026-06-02 MVP session closed cleanly + the multi-provider review cascade landed structurally + the lambda_scorer code already mode-parity-imports `compute_psi` via the cold-start `REFERENCE` capture. This session is the smallest possible structural step — schema-additive, ~50 lines of new handler code, one new external service (SNS). The plan-step discipline matters because the PSI cadence + dedupe questions (Items 1.cadence, 3) shape the test surface, not the production code surface. Resolve those before scaffolding tests; the code lands quickly once the test shape is locked.
 
-- ✅ HANDOFF.md §6 Q5 resolved — captured as ADR 0010 (recommended) or session-log decision.
-- ✅ `context/_interfaces.md` §"DynamoDB schema" updated from TBD to the resolution.
-- ✅ `lambda_scorer/` scaffolded with `__init__.py`, `handler.py`, tests.
-- ✅ Cold-start path tested with `moto`: model + reference loaded, version-match validated.
-- ✅ Hot-path tested: IoT Rule event → DynamoDB read → feature extract → score → DynamoDB write. PSI + SNS NOT in scope.
-- ✅ Structural-parity test green (`test_structural_parity_lambda_scorer_imports_from_shared` + the existing three local_runtime guards).
-- ✅ Test count = 350 + 1 skipped + N new (Item 6).
-- ✅ Deploy-zip footprint verified ≤ ~125 MB unzipped per ADR 0006 §Footprint.
-- ✅ Session log + review packet written. Commit draft includes the PowerShell sequence per DEV_NORMS §7 (new norm).
-- ⏳ Carry-forward: PSI compute + SNS alert + state-record-with-psi-dict in a follow-on lambda_scorer session.
-
-## Open questions to raise with PO at plan-step
-
-1. **§6 Q5 resolution** — Claude's lean is option A (`PK = pump_id, SK = timestamp`) for MVP simplicity. PO call.
-2. **PSI window in DynamoDB or in-process memory?** Affects table design and cold-start time. Recommend: DynamoDB-backed (idempotent across cold starts; matches "stateless Lambda" north star).
-3. **Q5 → ADR 0010 or session-log note?** Recommend ADR 0010 — first DynamoDB schema decision, sticks long-term. Compare with the 2026-06-04 session's Q1 disposition: that one was a refinement of an existing PO call; this one is a fresh structural decision.
-4. **MVP scope discipline.** PSI + SNS deferred? Recommend yes — bundling them in this session pushes scope past one-day work. Carry to a follow-on lambda_scorer session.
-5. **Deploy-zip recipe re-verification.** ADR 0006 §Footprint table was updated this session (model.pkl ~290 KB + operational reference ~2.2 KB). Re-measure unzipped Lambda deploy size at session close.
-
-## Tone note for the session
-
-2026-06-04 closed cleanly; one disagreement recorded with Gemini (Q1 bump-vs-amendment). This session adds a new structural decision (Q5) to the locked-decision list. Plan-step discipline matters MORE here than in routine sessions because the schema decision sticks for the project's lifetime — a re-do means a data migration, not a code rewrite. ADR 0010 is the likely deliverable alongside the code.
-
-Reminder: outputs/cp pattern is the default. Do not reach for `Edit` on D:\ files even speculatively — the 76-line incident on `context/model.md` proved the threshold is lower than the prior memory claimed. Per the 2026-06-04 update to [[ml_obs_pipeline_fuse_write_truncation]].
+Reminder: outputs/cp pattern is the default. The Reviewer-model loop (ADR 0011) applies to this session's review packet — when the cascade runs it, weight findings against the response file's provenance footer.

@@ -3,8 +3,10 @@
 > Paste this entire file into Gemini via:
 > `gemini -p "$(cat review_packets/YYYY-MM-DD-<slug>.md)" > review_responses/YYYY-MM-DD-<slug>.md`
 
-## Role for Gemini
+## Role for the reviewer model
 You are an adversarial-but-fair code reviewer for a portfolio project. Your job is not to rubber-stamp. Surface risks, design weaknesses, and trade-offs that the author may have rationalized past. Cite specific files and lines when possible.
+
+(Per ADR 0011, this packet may be reviewed by any model in the cascade: Gemini, DeepSeek R1 via OpenRouter, Llama 3.3 70B via Groq, or Llama 3.3 70B via Cerebras. The role is identical across providers; the response file's footer records which one actually wrote the response.)
 
 ## Project north stars (constraint anchors)
 1. $0 lifetime AWS cost.
@@ -25,7 +27,7 @@ Paste the unified diff inline, or list the changed files with one-line descripti
 <paste here>
 ```
 
-## Specific questions for Gemini
+## Specific questions for the reviewer
 Be explicit. Vague packets get vague reviews.
 
 1. <Question 1 — e.g., "Is the PSI smoothing strategy correct under sparse-bin conditions?">
@@ -37,9 +39,9 @@ Be explicit. Vague packets get vague reviews.
 - E.g., "Style / formatting — handled by linter."
 - E.g., "Test coverage — separate PR coming."
 
-## Resolution (filled in by Claude after Gemini responds)
+## Resolution (filled in by Claude after the reviewer responds)
 
-| Gemini point | Disposition | Notes |
+| Reviewer point | Disposition | Notes |
 |---|---|---|
 | 1. <summarize> | Addressed / Deferred / Rejected | <where, why> |
 | 2. ... | ... | ... |
