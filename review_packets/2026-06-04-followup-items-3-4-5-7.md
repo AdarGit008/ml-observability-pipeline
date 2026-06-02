@@ -171,6 +171,11 @@ For each feature: 10 bins, total samples = 27000, bin_counts = [2700] * 10  ✓ 
 
 | Gemini point | Disposition | Notes |
 |---|---|---|
-| 1. <summarize> | Addressed / Deferred / Rejected | <where, why> |
-| 2. ... | ... | ... |
-| 3. ... | ... | ... |
+| Q1 — 5→15 bump: Gemini recommended ADR 0008 amendment over session-log note | **Rejected (disagreement recorded)** | PO call (2026-06-04 post-Gemini): stand on session-log note. Gemini's "stale spec smell" critique is sound — ADR 0008 §Decision.2 reads "5 pumps" while code reads "15". Counter-argument that won: ADR 0008 §Footprint already establishes the 5-pump structural floor (<0.05 PSI shift between 5 and 50 pumps), so a refinement within that floor stays in "session-log refinement" territory, not "decision reversal." Surfaced per DEV_NORMS §1. |
+| Q2 — Item 4 banners vs docstring redundancy | Addressed (agreement) | Gemini concurred: banners are tripwires precisely because docstrings are scrolled past. ADR citations inside the banners are the right anti-drift mechanism. No change. |
+| Q3 — Item 7 scope expansion (shared/drift.py docstring + error-msg strings) | Addressed (agreement) | Gemini concurred: string-only edits to docstrings + error messages are maintenance, not refactoring. Punting would have left the lambda_scorer cold-start error path citing a non-existent file — "where is my artifact?" tail-chase. No change. |
+| Adv. Obs 1 — README 15-vs-30 pump ambiguity | **Addressed (edit)** | `model/artifacts/README.md` gained a new "Two pump counts, two purposes" section spelling out the `--n-pumps` CLI flag (training corpus: 12 sandbox / 30 production) vs `OPERATIONAL_REFERENCE_PUMPS` module constant (operational reference: fixed at 15, invariant under `--n-pumps`). Both numbers exist for different reasons. |
+| Adv. Obs 2 — "45-second bash cap" too session-specific for portfolio | **Addressed (edit)** | README phrasing updated: "sandbox / CI / any resource-constrained environment (a few seconds of CPU per pump)." Drops the bash-specific number; reads as portfolio-durable. |
+| Adv. Obs 3 — HANDOFF.md internal anchor-link survival post-pandoc | Addressed (verified moot) | Grep on `\]\(#\|<a name=\|\{#[a-z]` returns zero hits in HANDOFF.md. Section numbering ("§6 Q4") is plain numbered headers, no markdown anchors. Non-issue. |
+
+**PO read of Gemini's overall posture:** Approved. Changes close ADR 0008/0009 technical debt cleanly; "loud" doc strategy is pragmatic; Item 7 scope expansion was the right engineering judgment over rigid brief adherence.

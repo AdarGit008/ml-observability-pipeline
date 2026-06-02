@@ -58,6 +58,22 @@ Close the four small follow-up items deferred from the 2026-06-03 ADR 0009 sessi
 - **Three-line `> ` blockquote stripping (HANDOFF.md cleanup).** The pandoc GFM conversion produced `  - > TEXT` patterns from Word's bullet-with-blockquote formatting. Two options: (a) leave as-is (faithful to docx, ugly markdown), (b) plain `markdown` output mode (clean bullets, ASCII-grid tables). Picked (c) — gfm + sed-strip `^( *(?:-|\d+\.)\s+)> /\1/`. Kept clean tables and clean bullets. Single residual `> ` was a legitimate blockquote, not an artifact.
 - **Sandbox-runtime model.pkl + reference are PROOF-OF-PIPELINE only.** The committed `model.pkl` (276.8 KB, AUC 0.998) was built from a 12-pump training corpus (45 s bash cap). The production canonical needs PO's native 30-pump regen (Item 6). The `model/artifacts/README.md` paragraph documents this distinction so a future reader doesn't get confused by the size delta.
 
+## Gemini review highlights
+
+Three direct questions + three adversarial observations. Full response at `review_responses/2026-06-04-followup-items-3-4-5-7.md` (re-encoded from PowerShell-default UTF-16 to UTF-8 in this session — a future `gemini > response.md` should use `Out-File -Encoding utf8` or the `scripts/gemini_review.ps1` wrapper per ADR 0001 to avoid the re-encode). Full disposition table in `review_packets/2026-06-04-followup-items-3-4-5-7.md` §Resolution.
+
+**Headline disagreement (Q1):** Gemini recommended an "Amended 2026-06-04" note in ADR 0008 §Decision 2 to close the stale-spec gap (ADR reads "5 pumps", code reads "15"). PO call after review: **stand on session-log note** — ADR 0008 §Footprint already establishes the 5-pump structural floor at <0.05 PSI shift up to 50 pumps, so a refinement within that floor reads as session-log territory rather than an ADR amendment. Disagreement surfaced per DEV_NORMS §1.
+
+**Agreements (Q2 + Q3):** Gemini concurred that the three loud banners in `model/train.py` work as tripwires precisely because docstrings get scrolled past, and that Item 7's scope expansion into `shared/drift.py` (docstring + error-message strings only) was the right engineering call over rigid brief adherence.
+
+**Adversarial observations actioned (all three):**
+
+- **Obs 1 (README 15-vs-30 ambiguity).** `model/artifacts/README.md` grew a "Two pump counts, two purposes" section spelling out `--n-pumps` (training corpus, 12 sandbox / 30 production) vs `OPERATIONAL_REFERENCE_PUMPS` (operational reference, fixed at 15, invariant under `--n-pumps`).
+- **Obs 2 ("45-second bash cap" too meta).** README phrasing now reads "sandbox / CI / any resource-constrained environment" — portfolio-durable, drops the bash-specific number.
+- **Obs 3 (HANDOFF.md anchor-link survival post-pandoc).** Grep confirms zero anchor-style internal links exist in HANDOFF.md. Non-issue.
+
+**PO read of Gemini's overall posture:** Approved. Changes close ADR 0008/0009 technical debt cleanly; doc strategy is pragmatic; scope expansion was correct engineering judgment.
+
 ## Tests state
 
 **350 passed + 1 skipped** in 15.26 s (sandbox). **Unchanged from the 2026-06-03 baseline** — Item 3's constant bump doesn't add or remove tests (the `n_pumps=2`/`ticks=300` sandbox test for `_generate_operational_samples` runs against its own tiny shape, unaffected by the module-level constant); Item 4 is comment-only; Item 5 is doc-only; Item 7 is string-only across docstrings and error messages. Structural-parity tests (`test_structural_parity_no_vendoring`, `test_structural_parity_compute_psi_loads_from_shared`, `test_psi_feature_names_is_subset_of_feature_names`) all green.

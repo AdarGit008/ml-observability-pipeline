@@ -180,6 +180,7 @@ If a fact appears in more than one place, it's a bug. Pick one home and link.
 - **PR description:** Link the session log + any new ADRs + the review response.
 - **One PR per session** in the normal case. Stacked PRs allowed for refactors that genuinely fan out.
 - **`git secrets` pre-commit hook required** (already in `ACCOUNT_SETUP.md §7`).
+- **Commit drafts ship with the staging command sequence** *(new 2026-06-04)*. Every commit-message draft Claude produces — in chat, in a session log, in a review packet — is paired with the full PowerShell sequence: `git status` + `git diff --stat` (sanity-check) → `git add -A` → `git status` + `git diff --cached --name-status` (verify staged) → here-string piped to `Out-File -Encoding utf8 -NoNewline $env:TEMP\commit-msg.txt` then `git commit -F` (UTF-8 commit message, no PowerShell `>` UTF-16 trap) → `git log -1 --stat` (confirm). Sequence is canonical pattern from `docs/sessions/2026-06-04-followup-items-3-4-5-7.md`. Rationale: avoid re-deriving the encoding/here-string pattern each commit, surface staging mismatches before commit, dodge the `gemini > response.md` UTF-16 issue's sibling at commit time.
 
 ---
 
