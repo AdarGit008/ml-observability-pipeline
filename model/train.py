@@ -140,13 +140,21 @@ SAMPLE_EVERY_TICKS: int = 30
 # practice is 10 equal-frequency bins (PLAN.md §2.7 + _interfaces.md).
 PSI_BIN_COUNT: int = 10
 
-# Operational reference shape (ADR 0008). 5 pumps × 1800 ticks = 9000
-# samples per the PO call in the 2026-06-02 session log:
+# Operational reference shape (ADR 0008, refined by Item 3 of the
+# 2026-06-04 follow-up session). 15 pumps × 1800 ticks = 27_000
+# samples — matches the demo fleet's pump count so "the operational
+# baseline" reads as "the demo fleet's healthy baseline" with zero
+# mental translation for a future debugger:
 #  - 200 samples/bin × 10 bins = 2000-sample floor for stable equal-
-#    frequency quantiles; 9000 clears it ~4.5× with margin.
-#  - Five pumps average out per-pump noise instances; one pump would
-#    bake the reference into a single trajectory's noise realisation.
-OPERATIONAL_REFERENCE_PUMPS: int = 5
+#    frequency quantiles; 27_000 clears it ~13.5× with margin.
+#  - Fifteen pumps average out per-pump noise instances; one pump
+#    would bake the reference into a single trajectory's noise
+#    realisation.
+#  - ADR 0008 §Footprint measured the PSI shift between 5- and 50-
+#    pump references at < 0.05 — the structural floor is settled.
+#    The 5 → 15 bump is for narrative alignment, not numerics.
+#  - Wall-clock cost: ~3× vs the 5-pump build (~3 s vs ~1 s sandbox).
+OPERATIONAL_REFERENCE_PUMPS: int = 15
 OPERATIONAL_REFERENCE_TICKS_PER_PUMP: int = 1800  # 1 hour at 2 s/tick
 
 # Artifact paths — resolved relative to the repo root so the script
@@ -176,6 +184,13 @@ def _model_version(seed: int) -> str:
 # -- Training-data generation -----------------------------------------------
 
 
+# ### ASYMMETRIC PROFILES BY DESIGN (ADR 0008) ###
+# _training_profiles and _operational_profiles produce DIFFERENT
+# dict[PumpState, StateProfile] shapes on purpose. The model corpus
+# needs the stretched 48h DEGRADING ramp (ADR 0006); the operational
+# PSI reference needs DEFAULT_PROFILES verbatim (ADR 0008). Do NOT
+# "harmonize" them — conflation produced PSI 1.3–6.7 SIGNIFICANT on
+# healthy fleets pre-ADR-0008.
 def _training_profiles(healthy_dwell_ticks: int) -> dict[PumpState, StateProfile]:
     """Per-pump profiles for training-data generation.
 
@@ -222,6 +237,11 @@ def _training_profiles(healthy_dwell_ticks: int) -> dict[PumpState, StateProfile
     return profiles
 
 
+# ### ASYMMETRIC PROFILES BY DESIGN (ADR 0008) ###
+# Companion to _training_profiles — see banner above for the full
+# rationale. Returns DEFAULT_PROFILES verbatim; mirrors
+# _training_profiles in shape (fresh dict, not the module-level
+# DEFAULT_PROFILES) but emphatically NOT in content.
 def _operational_profiles() -> dict[PumpState, StateProfile]:
     """Demo-pace profiles for the operational PSI reference baseline.
 
@@ -525,6 +545,13 @@ def fit_model(
     return clf
 
 
+# ### PSI SURFACE ≠ SCORER FEATURE SET (ADR 0009) ###
+# This function slices the 8-column X matrix (FEATURE_NAMES) down to
+# the 4-column PSI surface (PSI_FEATURE_NAMES) before binning. Do NOT
+# iterate FEATURE_NAMES here — rolling features violate PSI's IID
+# assumption (149/150 overlap between consecutive 5-min windows) and
+# produce 0.10–0.40 autocorrelation noise on healthy fleets (ADR 0009
+# §Decision; ADR 0008 §Negative measurement).
 def compute_reference_distribution(
     X_train: np.ndarray,
     *,

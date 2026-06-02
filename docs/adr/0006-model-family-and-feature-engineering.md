@@ -284,7 +284,7 @@ is true.
 - Review packet: `review_packets/2026-06-01-model-train-histgbt.md`.
 - Implementation: `model/train.py`, `shared/score.py`,
   `model/artifacts/model.pkl`,
-  `model/artifacts/reference_distribution.json`.
+  `model/artifacts/operational_reference_distribution.json`.
 - Tests: `model/tests/test_train.py`,
   `model/tests/test_score_wiring.py`, updated
   `local_runtime/tests/test_shared_stubs.py`.
@@ -365,7 +365,7 @@ Lambda layer convention:
 | joblib         |  0.9 MB       |
 | threadpoolctl  |  ~0.1 MB      |
 | **Subtotal**   | **~123 MB**   |
-| `shared/` + `lambda_scorer/` + `model/artifacts/` (model.pkl 300 KB + reference 5 KB) | ~0.5 MB |
+| `shared/` + `lambda_scorer/` + `model/artifacts/` (model.pkl ~290 KB + operational reference ~2.2 KB, post-ADR-0009) | ~0.5 MB |
 | **Estimated deploy zip (unzipped)** | **~124 MB** |
 
 Lambda's unzipped quota is 250 MB. Headroom: ~50 % — comfortable but

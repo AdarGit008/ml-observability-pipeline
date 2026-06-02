@@ -147,7 +147,7 @@ def load_reference(
 
     Args:
         ref_path: path to the reference JSON. Defaults to
-            ``model/artifacts/reference_distribution.json`` relative
+            ``model/artifacts/operational_reference_distribution.json`` relative
             to the repo root.
         model_path: path to ``model.pkl`` for the version-match
             check. Defaults to ``model/artifacts/model.pkl``. If the
@@ -253,7 +253,7 @@ def _check_model_version_match(ref: dict, model_path: Path) -> None:
         raise DriftError(
             "model/reference version mismatch -- "
             f"model.pkl model_version={model_version!r}, "
-            f"reference_distribution.json model_version={ref_version!r}. "
+            f"operational_reference_distribution.json model_version={ref_version!r}. "
             "Re-run `python -m model.train` so both artifacts share a version."
         )
 

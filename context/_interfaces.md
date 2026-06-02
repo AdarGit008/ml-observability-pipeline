@@ -50,8 +50,8 @@ s3://<bucket>/year=YYYY/month=MM/day=DD/hour=HH/<batch>.parquet
 - Glue Catalog table defined in `infra/modules/glue_catalog/`, no Crawler.
 
 ## Reference distribution (PSI baseline)
-- File: `model/artifacts/reference_distribution.json`
-- Format: per-feature histograms with bin edges + bin counts.
+- File: `model/artifacts/operational_reference_distribution.json` (ADR 0008 operational; 4-feature PSI surface per ADR 0009).
+- Format: per-PSI-feature histograms with bin edges + bin counts.
 - Loaded by both `local_runtime/scorer_service.py` and `lambda_scorer/handler.py`.
 - Bundling location during AWS mode: open, see HANDOFF §6 Q4.
 

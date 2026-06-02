@@ -17,11 +17,11 @@
 Predicts P(pump fails within 48h) from 4 raw signals + 4 rolling features. Trained on synthetic data from the simulator in fast-forward.
 
 ## Current state
-- ✅ Shipped 2026-06-01. Held-out AUC = **0.997** on 3 pumps held out from a 12-pump corpus (sandbox-runtime regen 2026-06-02 and again 2026-06-03 after ADR 0009); 0.998 originally on 6/30 split. AUC well above 0.85 acceptance.
+- ✅ Shipped 2026-06-01. Held-out AUC = **0.997** on 3 pumps held out from a 12-pump corpus (sandbox-runtime regens 2026-06-02, 2026-06-03 after ADR 0009, and 2026-06-04 after Item 3's 5→15 operational-reference bump). 2026-06-04 production native build (Item 6, PO Windows-side) re-ran at the canonical 6/30 split: AUC = **0.9979**. AUC well above 0.85 acceptance throughout.
 - Reproducible: `python -m model.train` (~30 s on a sandbox at 12 pumps, ~75 s natively at 30 pumps; `--reference-source operational` is the default per ADR 0008).
-- Artifacts committed: `model/artifacts/model.pkl` (~290 KB), `model/artifacts/operational_reference_distribution.json` (~2.2 KB after ADR 0009 — half the pre-ADR-0009 size because the surface shrank from 8 to 4 features). The old `reference_distribution.json` is retired (PO removes via `git rm`).
+- Artifacts committed: `model/artifacts/model.pkl` (~300 KB at the canonical 30-pump native build), `model/artifacts/operational_reference_distribution.json` (~2.4 KB at the 15-pump operational reference post-Item-3; ~2.2 KB pre-Item-3 — the JSON wire size barely scales with sample count since bin counts are fixed at 10). The old training-time `reference_distribution.json` is retired (ADR 0008 ship + 2026-06-04 Item 7 sweep cleaned every live reference; ADR 0007 + 0008's own internal mentions of the old name are immutable historical context). `model/artifacts/README.md` distinguishes the sandbox 12-pump pipeline-validation build from the 30-pump production canonical.
 - ADR 0006 carries the model family / feature engineering / DEGRADING-dwell-stretch rationale (still stands).
-- ADR 0008 carries the operational reference source-separation (DEFAULT_PROFILES HEALTHY-only, 5 pumps × 1800 post-warm-up ticks).
+- ADR 0008 carries the operational reference source-separation (DEFAULT_PROFILES HEALTHY-only, 15 pumps × 1800 post-warm-up ticks = 27 000 samples post-2026-06-04 Item 3 bump; was 5 × 1800 = 9000 at ADR 0008 ship). The 5→15 bump aligns the operational baseline fleet size with the demo fleet; ADR 0008 §Footprint measured the structural floor at < 0.05 PSI shift between 5- and 50-pump references, so the bump is for narrative alignment, not numerics.
 - ADR 0009 carries the PSI surface ≠ scorer feature set asymmetry: model bundle's `feature_names` is `FEATURE_NAMES` (8); reference JSON's `feature_names` is `PSI_FEATURE_NAMES` (4). `compute_reference_distribution` slices the 8-column X matrix down to the 4-column PSI surface before binning.
 - Gemini review 2026-06-01 cleared the model design; 3 of 7 points drove changes (Q3 doc note, Q4 footprint measurement, Q6 joblib import position). Disposition table in `review_packets/2026-06-01-model-train-histgbt.md`; long-form in ADR 0006 §Addendum 2026-06-01.
 - Gemini-approved 2026-06-03 on ADR 0009; ADR 0008 review still pending.
@@ -71,6 +71,7 @@ Lambda's unzipped limit is 250 MB. ~50 % headroom. Bundling (HANDOFF.md §6 Q3 d
 ## Related ADRs
 - ADR 0005 — parity boundary (`shared/{features,score,drift}`). `shared.score.score` is rewritten inside the boundary; structural parity tests still pass. §3 InfluxDB schema line carries an ADR 0009 amendment (17 → 13 fields per point).
 - ADR 0006 — model family + feature engineering + training-time DEGRADING-dwell stretch. **Accepted** (Gemini review folded; PO sign-off pending). Still stands; ADR 0008 + ADR 0009 are architecturally-separate decisions.
+- ADR 0007 — PSI implementation, Laplace α, `reference=None`, version match, per-tick cadence. **Accepted**. Formula / smoothing / cadence decisions hold under ADR 0008 and ADR 0009; only the reference baseline (ADR 0008) and the iterated feature set (ADR 0009) changed.
 - ADR 0008 — operational PSI reference source-separated from the training corpus (DEFAULT_PROFILES HEALTHY-only). **Accepted** 2026-06-02 (Gemini review pending).
 - ADR 0009 — PSI surface ≠ scorer feature set (drops the 4 rolling features from PSI). **Accepted** 2026-06-03 (Gemini-approved 2026-06-03). Closes the autocorrelated-PSI carry-in from ADR 0008.
 - ADR 0002 — bearing_temp non-monotonicity carry-in. Honoured by `bearing_temp_std_5m` as the wear feature.
