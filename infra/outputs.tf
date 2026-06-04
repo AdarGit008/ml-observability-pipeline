@@ -1,5 +1,5 @@
-# Outputs promised by context/infra.md §Interfaces. The Grafana
-# adapter Function URL + S3 bucket name land in later sessions.
+# Outputs promised by context/infra.md §Interfaces. The S3 bucket
+# name lands with the cold-path session.
 
 output "sns_topic_arn" {
   description = "Alert topic ARN — also injected into the Lambda env as SNS_TOPIC_ARN."
@@ -25,4 +25,13 @@ output "lambda_function_arn" {
 
 output "iot_rule_arn" {
   value = module.iot_rule.rule_arn
+}
+
+output "adapter_function_url" {
+  description = "Public fleet-snapshot endpoint (ADR 0014) — paste into the Grafana Infinity datasource as the base URL."
+  value       = module.dashboards_adapter.function_url
+}
+
+output "adapter_function_name" {
+  value = module.dashboards_adapter.function_name
 }

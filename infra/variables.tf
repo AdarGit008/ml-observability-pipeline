@@ -43,3 +43,15 @@ variable "lambda_timeout_s" {
   type        = number
   default     = 10
 }
+
+variable "adapter_function_name" {
+  description = "Name of the Grafana fleet-snapshot adapter Lambda (ADR 0014). aws_teardown.sh derives the role + log-group names from it."
+  type        = string
+  default     = "pump-dashboard-adapter"
+}
+
+variable "fleet_size" {
+  description = "Pump count the adapter snapshots (P-01..P-NN per ADR 0014 §Decision 3). Must match the simulator fleet size — drift here means silently short snapshots."
+  type        = number
+  default     = 15
+}

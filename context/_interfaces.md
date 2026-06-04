@@ -2,7 +2,7 @@
 
 Load this when work crosses component boundaries (e.g., simulator → scorer, scorer → batcher). Keep schemas authoritative here; component files reference, don't duplicate.
 
-> **Status:** Most shapes below are resolved and live. Remaining open items are marked inline (Grafana adapter API contract — HANDOFF.md §6 Q1; AWS-mode reference bundling location — §6 Q4).
+> **Status:** All shapes below are resolved and live except the AWS-mode reference bundling location (HANDOFF §6 Q4 — open). Grafana adapter contract resolved 2026-06-04 by ADR 0014.
 
 ## MQTT topic pattern
 ```
@@ -69,7 +69,7 @@ last_alert_sent_at = <ISO-8601 ts>
 | Hot path: append reading | `PutItem` on the reading row |
 | Hot path: edge-trigger read | `GetItem(PK=pump_id, SK="STATE")` immediately before the STATE overwrite — previous `alert_flag` (publish gate) + `last_alert_sent_at` carry-forward (ADR 0012) |
 | Hot path: overwrite STATE | `PutItem` on the STATE row |
-| Dashboards: fleet latest | `BatchGetItem` across 15 STATE keys |
+| Dashboards: fleet latest | `BatchGetItem` across the `FLEET_SIZE` STATE keys — the adapter's ONLY operation (ADR 0014; IAM grants nothing else) |
 
 The `SK begins_with "2"` predicate filters out the STATE row (ISO-8601 timestamps start with year digits; `"STATE"` starts with `S`). Reading PutItem + STATE PutItem are NOT issued via `TransactWriteItems` — see ADR 0010 §Item ordering for the rationale.
 
@@ -116,4 +116,32 @@ Published when PSI > 0.25 OR P(failure_48h) > 0.7. Publish is **edge-triggered**
 ```
 
 ## Grafana → DynamoDB adapter
-> **Open: HANDOFF.md §6 Q1.** Lambda Function URL + JSON datasource plugin is the leader. API contract TBD. The adapter consumes STATE rows via `BatchGetItem` per `## DynamoDB schema` above — one call per panel refresh, fleet-wide latest snapshot. Alert surfacing reads `alert_flag` (current breach) + `last_alert_sent_at` (last page) directly — no client-side threshold re-derivation (ADR 0012 §Alternatives 2C).
+> **Resolved 2026-06-04 by ADR 0014.** Read-only Lambda (`pump-dashboard-adapter`) behind a Function URL (AuthType=NONE — recorded PO call), consumed by the Grafana **Infinity** plugin with root selector `$.pumps`. One `BatchGetItem` over the fleet's STATE keys per panel refresh.
+
+One GET (path ignored; non-GET → 405) returns:
+
+```json
+{
+  "fleet_size":      15,
+  "pumps_reporting": 13,
+  "as_of":           "<adapter invocation ts, ISO-8601 UTC ms>",
+  "pumps": [
+    {
+      "pump_id":            "P-01",
+      "latest_ts":          "2026-06-04T14:32:00.971Z",
+      "latest_score":       0.04,
+      "psi_vibration_amp":  0.02,
+      "psi_bearing_temp":   0.01,
+      "psi_motor_current":  0.03,
+      "psi_rpm":            0.02,
+      "alert_flag":         false,
+      "last_alert_sent_at": null
+    }
+  ]
+}
+```
+
+- `psi_<feature>` keys are the ADR 0005 §3 InfluxDB field names — AWS-mode and local-mode panels share one vocabulary, zero transforms.
+- `alert_flag` (current breach) + `last_alert_sent_at` (last page) are **literal STATE-row passthroughs** — no client-side threshold re-derivation (ADR 0012 §Alternatives 2C). Storage's absent-until-first-publish maps to explicit JSON `null` on the wire (stable key set; ADR 0014 §Decision 2).
+- Pumps without a STATE row are **omitted** (no null-filled placeholders); `pumps_reporting` vs `fleet_size` carries the gap.
+- `pumps` is sorted by `pump_id`; failures return 500 with a generic body (the URL is public); persistent `UnprocessedKeys` is a 500, never a silently short list.

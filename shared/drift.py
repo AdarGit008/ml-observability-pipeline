@@ -2,7 +2,7 @@
 
 Drift session 2026-06-01 swapped the stub for the binned, Laplace-
 smoothed PSI computation specified in PLAN.md s2.7. Both
-``local_runtime`` and the future ``lambda_scorer`` import
+``local_runtime`` and ``lambda_scorer`` import
 ``compute_psi`` from here as peers (ADR 0005); the structural-parity
 test ``test_structural_parity_compute_psi_loads_from_shared`` continues
 to pin the load path.
@@ -122,7 +122,7 @@ def load_reference(
 
     Single I/O entry point for the drift module. Called once per
     process lifetime by ``local_runtime/service.py``'s ``ScorerService.
-    __init__`` (and the future ``lambda_scorer`` cold-start path);
+    __init__`` (and ``lambda_scorer/handler.py``'s cold-start path);
     the caller stores the result and passes it explicitly to
     ``compute_psi`` on each invocation.
 

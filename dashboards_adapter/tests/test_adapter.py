@@ -1,0 +1,300 @@
+"""Tests for the fleet-snapshot adapter (ADR 0014).
+
+Coverage map:
+
+- §Envelope + projection — full-fleet snapshot, flattened PSI keys,
+  Decimal→float, stable ordering.
+- §Partial fleet — omit-don't-null-fill + ``pumps_reporting``;
+  reading rows don't leak in (BatchGetItem is exact-key).
+- §Alert passthrough — ADR 0012 literalism: flag + timestamp verbatim,
+  absent → JSON null, and NO threshold logic anywhere in the module.
+- §HTTP surface — 405 on non-GET, 500 on persistent UnprocessedKeys,
+  generic error bodies (the URL is public).
+- §Read efficiency — exactly ONE BatchGetItem per invocation
+  (ADR 0010 "Dashboards: fleet latest" + ADR 0013 cost posture).
+- §Boundary — the adapter never imports ``shared/`` (ADR 0014
+  §Decision 5: it stays OUTSIDE the ADR 0005 parity set; this is the
+  inverse of the parity tests — the scorer MUST import shared, the
+  adapter MUST NOT).
+- §Cold start — FLEET_SIZE expansion + 1..99 fail-fast validation.
+"""
+
+from __future__ import annotations
+
+import importlib
+import json
+import re
+from pathlib import Path
+from unittest import mock
+
+import pytest
+
+from dashboards_adapter.tests.conftest import get_event, put_state_row
+
+
+# --- §Envelope + projection ---
+
+def test_full_fleet_snapshot(fresh_adapter):
+    handler_mod, table = fresh_adapter
+    for i in range(1, 16):
+        put_state_row(table, f"P-{i:02d}", score=i / 100)
+
+    resp = handler_mod.handler(get_event(), None)
+
+    assert resp["statusCode"] == 200
+    assert resp["headers"]["Content-Type"] == "application/json"
+    body = json.loads(resp["body"])
+    assert body["fleet_size"] == 15
+    assert body["pumps_reporting"] == 15
+    assert len(body["pumps"]) == 15
+    # ISO-8601 UTC millisecond format, project-wide convention.
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", body["as_of"])
+
+
+def test_pump_entry_shape_and_flattened_psi(fresh_adapter):
+    handler_mod, table = fresh_adapter
+    put_state_row(
+        table,
+        "P-07",
+        score=0.42,
+        psi={"vibration_amp": 0.31, "bearing_temp": 0.08,
+             "motor_current": 0.05, "rpm": 0.02},
+    )
+
+    body = json.loads(handler_mod.handler(get_event(), None)["body"])
+    (pump,) = body["pumps"]
+
+    # Exact key set — the ADR 0014 wire contract, including the
+    # ADR 0005 §3 InfluxDB field names for PSI (panel mode-symmetry).
+    assert set(pump) == {
+        "pump_id", "latest_ts", "latest_score",
+        "psi_vibration_amp", "psi_bearing_temp",
+        "psi_motor_current", "psi_rpm",
+        "alert_flag", "last_alert_sent_at",
+    }
+    # Decimal → float: json.dumps would raise on Decimal; also pin
+    # the values round-trip numerically.
+    assert pump["latest_score"] == pytest.approx(0.42)
+    assert pump["psi_vibration_amp"] == pytest.approx(0.31)
+    assert isinstance(pump["latest_score"], float)
+    assert isinstance(pump["psi_rpm"], float)
+
+
+def test_pumps_sorted_by_pump_id(fresh_adapter):
+    handler_mod, table = fresh_adapter
+    for pid in ("P-09", "P-01", "P-15", "P-03"):
+        put_state_row(table, pid)
+
+    body = json.loads(handler_mod.handler(get_event(), None)["body"])
+    assert [p["pump_id"] for p in body["pumps"]] == ["P-01", "P-03", "P-09", "P-15"]
+
+
+# --- §Partial fleet ---
+
+def test_partial_fleet_omits_missing_pumps(fresh_adapter):
+    """Unscored pumps are ABSENT — no null-filled placeholder rows
+    (ADR 0014 §Decision 2); the envelope counts carry the gap."""
+    handler_mod, table = fresh_adapter
+    for i in range(1, 14):  # 13 of 15 reporting
+        put_state_row(table, f"P-{i:02d}")
+
+    body = json.loads(handler_mod.handler(get_event(), None)["body"])
+
+    assert body["fleet_size"] == 15
+    assert body["pumps_reporting"] == 13
+    reported = {p["pump_id"] for p in body["pumps"]}
+    assert "P-14" not in reported and "P-15" not in reported
+
+
+def test_reading_rows_never_leak_into_snapshot(fresh_adapter):
+    """A pump with reading rows but no STATE row stays absent —
+    BatchGetItem is exact-key (sk="STATE"), not a range read."""
+    handler_mod, table = fresh_adapter
+    put_state_row(table, "P-01")
+    # P-02 has telemetry history but was never STATE-snapshotted.
+    table.put_item(Item={
+        "pump_id": "P-02", "sk": "2026-06-04T12:00:00.000Z",
+        "vibration_amp": 1, "bearing_temp": 1, "motor_current": 1, "rpm": 1,
+    })
+
+    body = json.loads(handler_mod.handler(get_event(), None)["body"])
+    assert body["pumps_reporting"] == 1
+    assert [p["pump_id"] for p in body["pumps"]] == ["P-01"]
+
+
+# --- §Alert passthrough (ADR 0012 literalism) ---
+
+def test_alert_fields_literal_passthrough(fresh_adapter):
+    handler_mod, table = fresh_adapter
+    put_state_row(
+        table, "P-05",
+        alert_flag=True,
+        last_alert_sent_at="2026-06-04T11:58:30.500Z",
+    )
+
+    (pump,) = json.loads(handler_mod.handler(get_event(), None)["body"])["pumps"]
+    assert pump["alert_flag"] is True
+    assert pump["last_alert_sent_at"] == "2026-06-04T11:58:30.500Z"
+
+
+def test_never_alerted_maps_absent_attribute_to_null(fresh_adapter):
+    """Storage has no null sentinel (ADR 0012); the WIRE carries an
+    explicit null so the key set is stable (ADR 0014 §Decision 2)."""
+    handler_mod, table = fresh_adapter
+    put_state_row(table, "P-06", alert_flag=False, last_alert_sent_at=None)
+
+    (pump,) = json.loads(handler_mod.handler(get_event(), None)["body"])["pumps"]
+    assert pump["alert_flag"] is False
+    assert "last_alert_sent_at" in pump
+    assert pump["last_alert_sent_at"] is None
+
+
+def test_no_threshold_logic_in_module():
+    """The adapter never re-derives breach state (ADR 0012
+    §Alternatives 2C; ADR 0014 Principle). Pin it structurally: the
+    alert thresholds must not appear in the module source."""
+    src = Path(importlib.import_module("dashboards_adapter.handler").__file__).read_text(
+        encoding="utf-8"
+    )
+    code_only = "\n".join(
+        line for line in src.splitlines()
+        if not line.lstrip().startswith("#") and '"""' not in line
+    )
+    assert "0.25" not in code_only, "PSI threshold leaked into the adapter"
+    assert "0.7" not in code_only, "score threshold leaked into the adapter"
+
+
+# --- §HTTP surface ---
+
+def test_non_get_method_rejected(fresh_adapter):
+    handler_mod, _ = fresh_adapter
+    resp = handler_mod.handler(get_event("POST"), None)
+    assert resp["statusCode"] == 405
+
+
+def test_unprocessed_keys_retried_then_complete(fresh_adapter):
+    """UnprocessedKeys spillover is re-requested within the same
+    invocation; the caller still sees one complete snapshot."""
+    handler_mod, table = fresh_adapter
+    put_state_row(table, "P-01")
+    put_state_row(table, "P-02")
+
+    real_resp = handler_mod._DDB.batch_get_item(
+        RequestItems={
+            handler_mod.DDB_TABLE_NAME: {
+                "Keys": [{"pump_id": "P-01", "sk": "STATE"},
+                         {"pump_id": "P-02", "sk": "STATE"}],
+            }
+        }
+    )
+    items = real_resp["Responses"][handler_mod.DDB_TABLE_NAME]
+    first = {
+        "Responses": {handler_mod.DDB_TABLE_NAME: items[:1]},
+        "UnprocessedKeys": {
+            handler_mod.DDB_TABLE_NAME: {
+                "Keys": [{"pump_id": "P-02", "sk": "STATE"}],
+            }
+        },
+    }
+    second = {"Responses": {handler_mod.DDB_TABLE_NAME: items[1:]},
+              "UnprocessedKeys": {}}
+
+    fake_ddb = mock.Mock()
+    fake_ddb.batch_get_item.side_effect = [first, second]
+    with mock.patch.object(handler_mod, "_DDB", fake_ddb):
+        body = json.loads(handler_mod.handler(get_event(), None)["body"])
+
+    assert body["pumps_reporting"] == 2
+    assert fake_ddb.batch_get_item.call_count == 2
+    # The retry re-requested ONLY the spilled key.
+    retry_keys = fake_ddb.batch_get_item.call_args_list[1].kwargs[
+        "RequestItems"][handler_mod.DDB_TABLE_NAME]["Keys"]
+    assert retry_keys == [{"pump_id": "P-02", "sk": "STATE"}]
+
+
+def test_unprocessed_keys_exhausted_is_500_not_partial(fresh_adapter):
+    """A snapshot that can't complete returns 500 with a generic body
+    — never a silently short pump list (which would read as 'pump not
+    scored yet'). Internals stay off the public wire."""
+    handler_mod, _ = fresh_adapter
+    stuck = {
+        "Responses": {handler_mod.DDB_TABLE_NAME: []},
+        "UnprocessedKeys": {
+            handler_mod.DDB_TABLE_NAME: {
+                "Keys": [{"pump_id": "P-01", "sk": "STATE"}],
+            }
+        },
+    }
+    fake_ddb = mock.Mock()
+    fake_ddb.batch_get_item.return_value = stuck
+    with mock.patch.object(handler_mod, "_DDB", fake_ddb):
+        resp = handler_mod.handler(get_event(), None)
+
+    assert resp["statusCode"] == 500
+    assert fake_ddb.batch_get_item.call_count == handler_mod._BATCH_GET_ATTEMPTS
+    body = json.loads(resp["body"])
+    assert body == {"error": "internal error building fleet snapshot"}
+
+
+# --- §Read efficiency ---
+
+def test_single_batch_get_item_per_invocation(fresh_adapter):
+    """ONE BatchGetItem per panel refresh (ADR 0010 access pattern;
+    ADR 0013 cost posture) — not 15 GetItems, not a Query, not a Scan."""
+    handler_mod, table = fresh_adapter
+    for i in range(1, 16):
+        put_state_row(table, f"P-{i:02d}")
+
+    with mock.patch.object(
+        handler_mod._DDB, "batch_get_item",
+        wraps=handler_mod._DDB.batch_get_item,
+    ) as spy:
+        resp = handler_mod.handler(get_event(), None)
+
+    assert resp["statusCode"] == 200
+    assert spy.call_count == 1
+    keys = spy.call_args.kwargs["RequestItems"][handler_mod.DDB_TABLE_NAME]["Keys"]
+    assert len(keys) == 15
+    assert all(k["sk"] == "STATE" for k in keys)
+
+
+# --- §Boundary (inverse of the parity tests) ---
+
+def test_adapter_does_not_import_shared():
+    """ADR 0014 §Decision 5: the adapter stays OUTSIDE the ADR 0005
+    parity set by never importing ``shared/``. The day this fails,
+    the adapter joins the parity set and DEV_NORMS §5 Tier 2b applies
+    — update the parity-set list in the same PR."""
+    import dashboards_adapter.handler as handler_mod
+
+    src = Path(handler_mod.__file__).read_text(encoding="utf-8")
+    assert not re.search(
+        r"^\s*(from|import)\s+shared\b", src, flags=re.MULTILINE
+    ), "dashboards_adapter imports shared/ — it just joined the parity set"
+
+
+# --- §Cold start ---
+
+def test_fleet_size_env_expands_pump_ids(fresh_adapter, monkeypatch):
+    handler_mod, _ = fresh_adapter
+    monkeypatch.setenv("FLEET_SIZE", "3")
+    importlib.reload(handler_mod)
+    try:
+        assert handler_mod.FLEET_PUMP_IDS == ("P-01", "P-02", "P-03")
+    finally:
+        monkeypatch.delenv("FLEET_SIZE")
+        importlib.reload(handler_mod)
+
+
+@pytest.mark.parametrize("bad_size", ["0", "100", "-3"])
+def test_fleet_size_out_of_range_fails_cold_start(fresh_adapter, monkeypatch, bad_size):
+    """P-NN is two-digit zero-padded; 1..99 enforced fail-fast at
+    cold start so a misconfigured deploy never emits P-100."""
+    handler_mod, _ = fresh_adapter
+    monkeypatch.setenv("FLEET_SIZE", bad_size)
+    try:
+        with pytest.raises(ValueError, match="FLEET_SIZE"):
+            importlib.reload(handler_mod)
+    finally:
+        monkeypatch.delenv("FLEET_SIZE")
+        importlib.reload(handler_mod)
