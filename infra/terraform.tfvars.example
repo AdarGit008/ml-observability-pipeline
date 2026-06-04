@@ -1,0 +1,5 @@
+# Copy to terraform.tfvars (gitignored) and fill in. aws_region is
+# intentionally absent — locked default eu-central-1 (hard constraint #5).
+
+project_tag = "ml-obs-pipeline"
+alert_email = "you@example.com"

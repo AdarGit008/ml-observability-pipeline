@@ -1,0 +1,9 @@
+# Deploy-zip dependencies for the scorer Lambda (IaC session 2026-06-04).
+# Subset of the repo requirements.txt — ONLY what lambda_scorer +
+# shared/ import at runtime. scipy + threadpoolctl arrive transitively
+# with scikit-learn. boto3 is intentionally absent: the Lambda runtime
+# provides it, and bundling botocore would push the zip past the 50 MB
+# direct-upload limit (see scripts/build_lambda.* header).
+numpy>=1.26
+scikit-learn>=1.4
+joblib>=1.3

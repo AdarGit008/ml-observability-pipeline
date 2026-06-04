@@ -2,19 +2,21 @@
 
 PLAN.md §2.3 spec: 4 raw + 4 rolling features, 48h-failure-horizon label,
 ``HistGradientBoostingClassifier(max_depth=5, max_iter=100)``, AUC ≥ 0.85
-on held-out pumps. ADR 0006 is the long-form rationale for the choices
-captured here.
+on held-out pumps. ADR 0006 is the long-form rationale for the model-side
+choices; ADR 0008 is the long-form rationale for the reference-source
+separation that landed on 2026-06-02; ADR 0009 is the long-form rationale
+for the PSI-surface shrink (4 raw features only) that landed 2026-06-03.
 
 Run: ``python -m model.train``  →  writes both artifacts in one command:
 
-  - ``model/artifacts/model.pkl``                  (~200 KB, joblib)
-  - ``model/artifacts/reference_distribution.json`` (PSI baseline,
-    consumed by ``shared.drift.compute_psi`` once the drift session
-    ships)
+  - ``model/artifacts/model.pkl``                              (~300 KB, joblib)
+  - ``model/artifacts/operational_reference_distribution.json`` (PSI baseline,
+    consumed by ``shared.drift.compute_psi``)
 
-Both artifacts are deterministic given the same ``--seed`` (default 0).
+Both artifacts are deterministic given the same ``--seed`` (default 0)
+and share a ``model_version`` so a desync is detectable.
 
-Design notes (see ADR 0006 for the long-form):
+Design notes (see ADR 0006 + ADR 0008 + ADR 0009 for the long-form):
 
 - Fast-forward without MQTT/asyncio: training-data generation has no
   network-mode parity story to honour, so the asyncio+publisher layer
@@ -27,6 +29,29 @@ Design notes (see ADR 0006 for the long-form):
   docstring of ``shared/features.py`` and ADR 0005. The training
   features MUST come from the same code as the live scorer or mode
   parity is theatre.
+
+- **Two profiles, by design (ADR 0008).** Two helpers build profile
+  dicts that are NOT the same shape — and that asymmetry is intentional:
+
+  - ``_training_profiles`` (model corpus): HEALTHY dwell randomised
+    + DEGRADING stretched to 48h. The model needs a slow ramp to
+    learn from across the 48h failure horizon (ADR 0006 §3).
+  - ``_operational_profiles`` (PSI reference baseline):
+    ``DEFAULT_PROFILES`` verbatim. The reference distribution must
+    describe the *demo-paced HEALTHY* population the live runtime
+    sees — so PSI on healthy fleets reads < 0.10 instead of the
+    SIGNIFICANT 1.3–6.7 the training-corpus reference produced
+    (drift session 2026-06-01 measurement). ADR 0008 carries the
+    full rationale for the split.
+
+- **Two feature-name lists, by design (ADR 0009).** The model bundle's
+  ``feature_names`` is ``FEATURE_NAMES`` (8 entries — the scorer
+  consumes all 8). The reference JSON's ``feature_names`` is
+  ``PSI_FEATURE_NAMES`` (4 entries — only raw features land on the
+  PSI surface). ``compute_reference_distribution`` slices the 8-column
+  X matrix down to the 4-column PSI surface before binning, and
+  ``write_artifacts`` emits the two lists into their respective
+  artifacts. The asymmetry is the entire point of ADR 0009.
 
 - Training-time DEGRADING dwell is overridden from the simulator's
   DEFAULT_PROFILES (200 ticks ≈ 13 min) to ``HORIZON_TICKS`` (86,400
@@ -56,6 +81,14 @@ Design notes (see ADR 0006 for the long-form):
 
 - Train/test split by pump, not by time. Acceptance is "AUC ≥ 0.85
   on held-out pumps" so the held-out unit has to be a pump.
+
+- Operational reference uses every-tick sampling (not the training
+  cadence of 1 row / 30 ticks). The reference distribution must
+  describe per-tick feature values because ``compute_psi`` compares
+  per-tick feature dicts in its 1-hour rolling window. Training
+  cadence is downsampled to avoid overfitting on near-identical
+  windows; the reference has no such concern — it just needs
+  faithful shape.
 """
 
 from __future__ import annotations
@@ -66,14 +99,13 @@ import logging
 import sys
 from collections import deque
 from pathlib import Path
-from typing import Iterable
 
 import joblib
 import numpy as np
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import roc_auc_score
 
-from shared.features import FEATURE_NAMES, extract_features
+from shared.features import FEATURE_NAMES, PSI_FEATURE_NAMES, extract_features
 from simulator.pump import DEFAULT_PROFILES, Pump, PumpState, StateProfile
 
 
@@ -97,21 +129,46 @@ MAX_TICKS_PER_PUMP: int = 300_000
 # module docstring + ADR 0006 for the rationale.
 TRAINING_DEGRADING_DWELL_TICKS: int = HORIZON_TICKS  # 86_400
 
-# Sample feature windows every N ticks. 30 ticks ≈ 1 row/min. Keeps the
-# matrix at a manageable size and avoids overfitting to near-identical
-# windows that neighbouring ticks would produce.
+# Sample feature windows every N ticks (training corpus only). 30 ticks ≈
+# 1 row/min. Keeps the matrix at a manageable size and avoids overfitting
+# to near-identical windows that neighbouring ticks would produce. The
+# operational reference uses every-tick sampling instead — see
+# ``_generate_operational_samples``.
 SAMPLE_EVERY_TICKS: int = 30
 
 # Bins for the reference distribution per feature. PSI's standard
 # practice is 10 equal-frequency bins (PLAN.md §2.7 + _interfaces.md).
 PSI_BIN_COUNT: int = 10
 
+# Operational reference shape (ADR 0008, refined by Item 3 of the
+# 2026-06-04 follow-up session). 15 pumps × 1800 ticks = 27_000
+# samples — matches the demo fleet's pump count so "the operational
+# baseline" reads as "the demo fleet's healthy baseline" with zero
+# mental translation for a future debugger:
+#  - 200 samples/bin × 10 bins = 2000-sample floor for stable equal-
+#    frequency quantiles; 27_000 clears it ~13.5× with margin.
+#  - Fifteen pumps average out per-pump noise instances; one pump
+#    would bake the reference into a single trajectory's noise
+#    realisation.
+#  - ADR 0008 §Footprint measured the PSI shift between 5- and 50-
+#    pump references at < 0.05 — the structural floor is settled.
+#    The 5 → 15 bump is for narrative alignment, not numerics.
+#  - Wall-clock cost: ~3× vs the 5-pump build (~3 s vs ~1 s sandbox).
+OPERATIONAL_REFERENCE_PUMPS: int = 15
+OPERATIONAL_REFERENCE_TICKS_PER_PUMP: int = 1800  # 1 hour at 2 s/tick
+
 # Artifact paths — resolved relative to the repo root so the script
 # doesn't care about CWD.
 _REPO_ROOT: Path = Path(__file__).resolve().parent.parent
 ARTIFACTS_DIR: Path = _REPO_ROOT / "model" / "artifacts"
 MODEL_PATH: Path = ARTIFACTS_DIR / "model.pkl"
-REFERENCE_PATH: Path = ARTIFACTS_DIR / "reference_distribution.json"
+
+# ADR 0008 reference paths. The default is "operational" (demo-paced
+# HEALTHY); shared.drift._DEFAULT_REF_PATH points here. The training
+# path is reachable via --reference-source=training for historical
+# comparison and is not consumed by shared.drift at load time.
+OPERATIONAL_REFERENCE_PATH: Path = ARTIFACTS_DIR / "operational_reference_distribution.json"
+TRAINING_REFERENCE_PATH: Path = ARTIFACTS_DIR / "training_reference_distribution.json"
 
 
 def _model_version(seed: int) -> str:
@@ -127,6 +184,13 @@ def _model_version(seed: int) -> str:
 # -- Training-data generation -----------------------------------------------
 
 
+# ### ASYMMETRIC PROFILES BY DESIGN (ADR 0008) ###
+# _training_profiles and _operational_profiles produce DIFFERENT
+# dict[PumpState, StateProfile] shapes on purpose. The model corpus
+# needs the stretched 48h DEGRADING ramp (ADR 0006); the operational
+# PSI reference needs DEFAULT_PROFILES verbatim (ADR 0008). Do NOT
+# "harmonize" them — conflation produced PSI 1.3–6.7 SIGNIFICANT on
+# healthy fleets pre-ADR-0008.
 def _training_profiles(healthy_dwell_ticks: int) -> dict[PumpState, StateProfile]:
     """Per-pump profiles for training-data generation.
 
@@ -146,6 +210,10 @@ def _training_profiles(healthy_dwell_ticks: int) -> dict[PumpState, StateProfile
     FAILING and FAILED keep ``DEFAULT_PROFILES``: 200 ticks of rapid
     accelerating wear is what we want as the hardest-positive sample
     regime.
+
+    Companion: ``_operational_profiles`` returns ``DEFAULT_PROFILES``
+    verbatim — see ADR 0008 for why the model corpus and the PSI
+    reference use different profile dicts.
     """
     profiles: dict[PumpState, StateProfile] = dict(DEFAULT_PROFILES)
     healthy_default = DEFAULT_PROFILES[PumpState.HEALTHY]
@@ -167,6 +235,35 @@ def _training_profiles(healthy_dwell_ticks: int) -> dict[PumpState, StateProfile
         dwell_ticks=TRAINING_DEGRADING_DWELL_TICKS,
     )
     return profiles
+
+
+# ### ASYMMETRIC PROFILES BY DESIGN (ADR 0008) ###
+# Companion to _training_profiles — see banner above for the full
+# rationale. Returns DEFAULT_PROFILES verbatim; mirrors
+# _training_profiles in shape (fresh dict, not the module-level
+# DEFAULT_PROFILES) but emphatically NOT in content.
+def _operational_profiles() -> dict[PumpState, StateProfile]:
+    """Demo-pace profiles for the operational PSI reference baseline.
+
+    Returns ``DEFAULT_PROFILES`` verbatim — no overrides. The live demo
+    emits telemetry at these profiles; the reference distribution
+    captures what ``shared.drift.compute_psi`` will actually see in
+    operation, so PSI on a healthy fleet reads STABLE rather than
+    SIGNIFICANT.
+
+    Mirrors ``_training_profiles`` in shape (returns a fresh dict so
+    callers may mutate without poisoning the module-level
+    ``DEFAULT_PROFILES``) so the two reference-source paths read
+    symmetrically in ``main()``.
+
+    The asymmetry between this function and ``_training_profiles`` is
+    the entire point of ADR 0008: the model needs a slow 48h DEGRADING
+    ramp to learn from (ADR 0006); the reference needs the demo-paced
+    HEALTHY distribution to describe normal operation (ADR 0008).
+    Conflating them — as the pre-ADR-0008 build did — yielded PSI
+    1.3–6.7 SIGNIFICANT on healthy fleets at demo time.
+    """
+    return dict(DEFAULT_PROFILES)
 
 
 def _healthy_dwells(n_pumps: int, rng: np.random.Generator) -> list[int]:
@@ -307,6 +404,123 @@ def generate_training_data(
     )
 
 
+# -- Operational reference generation (ADR 0008) ----------------------------
+
+
+def _generate_operational_samples(
+    n_pumps: int = OPERATIONAL_REFERENCE_PUMPS,
+    *,
+    ticks_per_pump: int = OPERATIONAL_REFERENCE_TICKS_PER_PUMP,
+    seed: int = 0,
+) -> np.ndarray:
+    """Generate the X matrix for the operational PSI reference baseline.
+
+    Runs ``n_pumps`` HEALTHY pumps for ``ticks_per_pump`` ticks each
+    via ``Pump.step()`` against ``DEFAULT_PROFILES`` (no overrides).
+    Extracts a feature dict every tick via ``shared.features.
+    extract_features`` — the same code path the live runtime uses —
+    and stacks the per-pump feature rows into a single X matrix that
+    ``compute_reference_distribution`` then bins.
+
+    Returns shape ``(n_pumps * ticks_per_pump, len(FEATURE_NAMES))``.
+
+    Why every-tick sampling (not the training cadence of
+    ``SAMPLE_EVERY_TICKS=30``): ``compute_psi`` compares per-tick
+    feature dicts in its 1-hour rolling window. The reference
+    distribution must describe the same per-tick shape — downsampling
+    here would build a reference at one cadence and a live
+    comparison at another, producing spurious PSI in the
+    cross-cadence delta. Training cadence downsamples to avoid
+    overfitting on near-identical neighbouring windows; the
+    reference has no such concern.
+
+    Why ``n_pumps=5`` × ``ticks_per_pump=1800``: PO call (session log
+    2026-06-02). Floor for stable 10-bin equal-frequency quantiles is
+    ~200 samples/bin × 10 bins = 2 000 samples; 5 × 1 800 = 9 000
+    clears that with ~4.5× margin while averaging across five
+    independent pump-noise instances (single-pump would bake the
+    reference into one trajectory's noise realisation).
+
+    HEALTHY dwell guard: ``DEFAULT_PROFILES[HEALTHY].dwell_ticks`` is
+    43 200 (~24 h at 2 s/tick) >> 1 800. Every pump stays HEALTHY for
+    the full sample window. Asserted post-loop so a future dwell
+    shrink under ``DEFAULT_PROFILES`` fails loudly here, not silently
+    in the reference distribution.
+
+    Determinism: same ``--seed`` produces an identical reference.
+    Per-pump seeds follow the same ``seed * 10_000 + idx`` derivation
+    as ``generate_training_data`` so a future debugging session can
+    pin one operational pump against one training pump if needed.
+
+    Args:
+        n_pumps: number of HEALTHY pump trajectories to sample.
+        ticks_per_pump: ticks of HEALTHY telemetry per pump.
+        seed: master seed; per-pump seeds derived deterministically.
+
+    Returns:
+        ``np.ndarray`` shape ``(n_pumps * ticks_per_pump, 8)`` in
+        ``FEATURE_NAMES`` column order.
+
+    Raises:
+        RuntimeError: a pump left HEALTHY mid-sample (would happen
+            only if ``DEFAULT_PROFILES[HEALTHY].dwell_ticks`` were
+            reduced below ``ticks_per_pump``).
+    """
+    profiles = _operational_profiles()
+    per_pump_rows: list[np.ndarray] = []
+    # Total ticks per pump = ticks_per_pump + WINDOW_TICKS warm-up.
+    # We discard features extracted during warm-up (when the 5-min
+    # rolling window is still filling): rolling std grows from 0 to
+    # its steady-state value over the warm-up, so including those
+    # samples would create a "near-zero std" bin that the 1800-sample
+    # PSI window can only reproduce in the exact same proportion if
+    # the live window also includes warm-up. Mode-parity practice is
+    # for the reference to describe steady-state, and for the live
+    # PSI window to be evaluated on steady-state samples (which
+    # `service.py` ensures by waiting until `psi_window_samples` has
+    # filled before reporting).
+    total_ticks_per_pump = ticks_per_pump + WINDOW_TICKS
+    for idx in range(n_pumps):
+        pump_id = f"P-{idx:02d}"
+        per_pump_seed = seed * 10_000 + idx
+        pump = Pump(pump_id, seed=per_pump_seed, profiles=profiles)
+        window: deque = deque(maxlen=WINDOW_TICKS)
+        sample_features: list[np.ndarray] = []
+        for t in range(total_ticks_per_pump):
+            reading = pump.step()
+            window.append(reading)
+            if t < WINDOW_TICKS:
+                # Warm-up: rolling-window stats still settling. Skip.
+                continue
+            feat_dict = extract_features(list(window))
+            sample_features.append(
+                np.array(
+                    [feat_dict[name] for name in FEATURE_NAMES],
+                    dtype=np.float64,
+                )
+            )
+        if pump.state is not PumpState.HEALTHY:
+            raise RuntimeError(
+                f"pump {pump_id!r} left HEALTHY during operational "
+                f"sample (now {pump.state}). "
+                f"DEFAULT_PROFILES[HEALTHY].dwell_ticks "
+                f"({DEFAULT_PROFILES[PumpState.HEALTHY].dwell_ticks}) "
+                f"must exceed total_ticks_per_pump "
+                f"({total_ticks_per_pump})."
+            )
+        per_pump_rows.append(np.vstack(sample_features))
+        log.info(
+            "operational pump %s: n=%d HEALTHY samples (post warm-up)",
+            pump_id, ticks_per_pump,
+        )
+    X = np.vstack(per_pump_rows)
+    log.info(
+        "operational reference X: shape=%s (%d pumps x %d ticks)",
+        X.shape, n_pumps, ticks_per_pump,
+    )
+    return X
+
+
 # -- Model fit + artifact emission ------------------------------------------
 
 
@@ -331,26 +545,44 @@ def fit_model(
     return clf
 
 
+# ### PSI SURFACE ≠ SCORER FEATURE SET (ADR 0009) ###
+# This function slices the 8-column X matrix (FEATURE_NAMES) down to
+# the 4-column PSI surface (PSI_FEATURE_NAMES) before binning. Do NOT
+# iterate FEATURE_NAMES here — rolling features violate PSI's IID
+# assumption (149/150 overlap between consecutive 5-min windows) and
+# produce 0.10–0.40 autocorrelation noise on healthy fleets (ADR 0009
+# §Decision; ADR 0008 §Negative measurement).
 def compute_reference_distribution(
     X_train: np.ndarray,
     *,
     n_bins: int = PSI_BIN_COUNT,
 ) -> dict[str, dict[str, list]]:
-    """Per-feature 10-bin equal-frequency histograms from the train set.
+    """Per-feature 10-bin equal-frequency histograms for the PSI surface.
 
     Equal-frequency (quantile) bins are the standard PSI shape: each
     bin holds ~10 % of the reference mass, so PSI's log(actual/expected)
-    term is well-conditioned everywhere. The drift session's
+    term is well-conditioned everywhere. The drift module's
     ``compute_psi`` consumes ``bin_edges`` directly and applies its
     own Laplace smoothing at compute time — keeping reference counts
     as raw frequencies here lets that decision live in one place.
+
+    The ``X_train`` argument name predates ADR 0008 — the matrix
+    passed in can be either the training corpus (``--reference-source
+    training``, historical comparison) or the operational sample
+    (``--reference-source operational``, the default). The function
+    is source-agnostic; it bins whatever it's given. The X matrix's
+    columns are in ``FEATURE_NAMES`` order (8 columns); this function
+    only bins the columns whose names appear in ``PSI_FEATURE_NAMES``
+    (4 columns per ADR 0009 — rolling features are scorer inputs
+    only, never PSI surface members). The returned dict's keys are
+    exactly ``PSI_FEATURE_NAMES``.
 
     Bin edge handling: ``np.quantile`` can produce duplicate edges
     when a feature is near-constant (e.g., ``rpm`` for pumps that
     spend most of their time at setpoint). Duplicate edges make
     ``np.histogram`` assign all mass to one bin. We nudge duplicates
     forward via ``np.nextafter`` so every bin keeps a non-zero
-    width — the drift session will treat a near-degenerate bin as a
+    width — the drift module treats a near-degenerate bin as a
     low-mass bin (which gets smoothed) rather than crash.
 
     Output (per feature):
@@ -358,7 +590,12 @@ def compute_reference_distribution(
     """
     reference: dict[str, dict[str, list]] = {}
     quantile_levels = np.linspace(0.0, 1.0, n_bins + 1)
-    for i, name in enumerate(FEATURE_NAMES):
+    # Iterate the PSI surface, look up each name's column index in the
+    # 8-column X matrix. This is the ADR 0009 asymmetry baked into
+    # artifact emission: X carries all 8 features (the scorer corpus)
+    # but only 4 columns are sliced into the reference distribution.
+    for name in PSI_FEATURE_NAMES:
+        i = FEATURE_NAMES.index(name)
         column = X_train[:, i]
         edges = np.quantile(column, quantile_levels)
         for j in range(1, len(edges)):
@@ -378,39 +615,54 @@ def write_artifacts(
     *,
     seed: int,
     auc: float,
-    feature_names: Iterable[str] = FEATURE_NAMES,
+    ref_path: Path = OPERATIONAL_REFERENCE_PATH,
 ) -> None:
-    """Persist ``model.pkl`` and ``reference_distribution.json``.
+    """Persist ``model.pkl`` and the reference JSON.
 
     The model file bundles the classifier plus a small metadata
     header (version + feature names + held-out AUC) so the
     lambda_scorer's cold-start check can validate the artifact
     without re-deriving anything from training. Reference file
     carries the same ``model_version`` so a mismatch is detectable
-    at drift compute time.
+    at drift compute time (``shared.drift._check_model_version_match``).
+
+    ``ref_path`` defaults to ``OPERATIONAL_REFERENCE_PATH`` per
+    ADR 0008; ``main()`` overrides to ``TRAINING_REFERENCE_PATH``
+    when ``--reference-source=training``. The shape of the reference
+    JSON is identical regardless of source so the same load path
+    handles both.
+
+    Feature-name asymmetry (ADR 0009): the model bundle's
+    ``feature_names`` is ``FEATURE_NAMES`` (8 entries — the scorer
+    consumes all 8). The reference JSON's ``feature_names`` is
+    ``PSI_FEATURE_NAMES`` (4 entries — only raw features land on the
+    PSI surface). Both are validated at load time by
+    ``shared.score._load_classifier`` and
+    ``shared.drift.load_reference`` respectively; a future "let me
+    unify these" PR has to update ADR 0009.
     """
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
     version = _model_version(seed)
     bundle = {
         "model_version": version,
-        "feature_names": list(feature_names),
+        "feature_names": list(FEATURE_NAMES),
         "auc_held_out": float(auc),
         "classifier": clf,
     }
     joblib.dump(bundle, MODEL_PATH)
     ref_with_meta = {
         "model_version": version,
-        "feature_names": list(feature_names),
+        "feature_names": list(PSI_FEATURE_NAMES),
         "n_bins": PSI_BIN_COUNT,
         "features": reference,
     }
-    REFERENCE_PATH.write_text(json.dumps(ref_with_meta, indent=2))
+    ref_path.write_text(json.dumps(ref_with_meta, indent=2))
     log.info(
         "wrote %s (%.1f KB) + %s (%.1f KB) [version=%s, auc=%.3f]",
         MODEL_PATH,
         MODEL_PATH.stat().st_size / 1024,
-        REFERENCE_PATH,
-        REFERENCE_PATH.stat().st_size / 1024,
+        ref_path,
+        ref_path.stat().st_size / 1024,
         version,
         auc,
     )
@@ -431,6 +683,21 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=0.85,
         help="Fail with non-zero exit if held-out AUC is below this.",
+    )
+    parser.add_argument(
+        "--reference-source",
+        choices=["operational", "training"],
+        default="operational",
+        help=(
+            "Where the PSI reference distribution comes from. "
+            "'operational' (default, ADR 0008) uses DEFAULT_PROFILES "
+            "HEALTHY-only data — what the live demo emits — so PSI "
+            "on healthy fleets stays < 0.10. 'training' uses the "
+            "stretched-DEGRADING training matrix (the pre-ADR-0008 "
+            "behaviour) and writes to training_reference_distribution"
+            ".json for historical comparison; not consumed by "
+            "shared.drift at load time."
+        ),
     )
     args = parser.parse_args(argv)
 
@@ -458,10 +725,35 @@ def main(argv: list[str] | None = None) -> int:
     auc = float(roc_auc_score(y_test, y_score))
     log.info("held-out AUC: %.4f", auc)
 
-    log.info("computing reference distribution (%d bins)", PSI_BIN_COUNT)
-    reference = compute_reference_distribution(X_train, n_bins=PSI_BIN_COUNT)
+    if args.reference_source == "operational":
+        log.info(
+            "generating operational reference data (%d pumps x %d ticks, seed=%d)",
+            OPERATIONAL_REFERENCE_PUMPS,
+            OPERATIONAL_REFERENCE_TICKS_PER_PUMP,
+            args.seed,
+        )
+        X_ref = _generate_operational_samples(
+            OPERATIONAL_REFERENCE_PUMPS,
+            ticks_per_pump=OPERATIONAL_REFERENCE_TICKS_PER_PUMP,
+            seed=args.seed,
+        )
+        ref_path = OPERATIONAL_REFERENCE_PATH
+    else:
+        log.info(
+            "reference source = training (pre-ADR-0008 behaviour); "
+            "%d samples from the training matrix",
+            X_train.shape[0],
+        )
+        X_ref = X_train
+        ref_path = TRAINING_REFERENCE_PATH
 
-    write_artifacts(clf, reference, seed=args.seed, auc=auc)
+    log.info(
+        "computing reference distribution (%d bins) from %d samples → %s",
+        PSI_BIN_COUNT, X_ref.shape[0], ref_path.name,
+    )
+    reference = compute_reference_distribution(X_ref, n_bins=PSI_BIN_COUNT)
+
+    write_artifacts(clf, reference, seed=args.seed, auc=auc, ref_path=ref_path)
 
     if auc < args.min_auc:
         log.error("AUC %.4f below acceptance threshold %.2f", auc, args.min_auc)

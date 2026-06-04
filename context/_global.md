@@ -47,7 +47,7 @@ Real-time ML observability pipeline for a simulated fleet of industrial pumps. S
 
 These are facts that span multiple components. They are NOT in any one component file because changing one without changing the others is a bug.
 
-- **Mode-parity boundary (ADR 0005, Accepted 2026-05-29).** `shared/{features,score,drift}.py` is the locked parity contract. Both `local_runtime` and the future `lambda_scorer` import it as peers — no vendoring, no forks. Enforced by `local_runtime/tests/test_service.py::test_structural_parity_no_vendoring` (+ siblings). **If your session is in the parity set, you must follow DEV_NORMS §5 Tier 2b loading.** Parity set: `lambda_scorer`, `model`, `drift`, `local_runtime`, `dashboards`.
+- **Mode-parity boundary (ADR 0005, Accepted 2026-05-29).** `shared/{features,score,drift}.py` is the locked parity contract. Both `local_runtime` and `lambda_scorer` import it as peers — no vendoring, no forks. Enforced by `local_runtime/tests/test_service.py::test_structural_parity_no_vendoring` (+ siblings). **If your session is in the parity set, you must follow DEV_NORMS §5 Tier 2b loading.** Parity set: `lambda_scorer`, `model`, `drift`, `local_runtime`, `dashboards`.
 
 ## Where to look next
 - Workflow + roles: `DEV_NORMS.md`

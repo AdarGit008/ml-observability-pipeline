@@ -1,7 +1,7 @@
 """Scoring — wraps the trained HistGradientBoostingClassifier.
 
-Locked at the function signature level: both ``local_runtime`` and the
-future ``lambda_scorer`` call ``score(features) -> float in [0, 1]``
+Locked at the function signature level: both ``local_runtime`` and
+``lambda_scorer`` call ``score(features) -> float in [0, 1]``
 without caring how the score is produced. The model session
 (2026-06-01) swapped this from a deterministic stub to a real
 ``predict_proba`` call against ``model/artifacts/model.pkl``; the

@@ -6,6 +6,8 @@ These tests pin:
 - Rolling mean/std use population std (ddof=0).
 - Empty window raises ValueError loudly.
 - Missing required fields raise KeyError with the field name.
+- ADR 0009: ``PSI_FEATURE_NAMES`` is a strict subset of
+  ``FEATURE_NAMES``, pinned at the four raw signals.
 
 Mode-parity rationale: this function is what Lambda and local_runtime
 both call. Anything that drifts here drifts the entire scoring path.
@@ -17,7 +19,12 @@ import math
 
 import pytest
 
-from shared.features import FEATURE_NAMES, RAW_SIGNAL_FIELDS, extract_features
+from shared.features import (
+    FEATURE_NAMES,
+    PSI_FEATURE_NAMES,
+    RAW_SIGNAL_FIELDS,
+    extract_features,
+)
 
 
 def _reading(
@@ -54,6 +61,53 @@ def test_raw_signal_fields_pinned():
         "bearing_temp",
         "motor_current",
         "rpm",
+    )
+
+
+def test_psi_feature_names_pinned():
+    """ADR 0009: ``PSI_FEATURE_NAMES`` is the four raw signals only.
+
+    A future "let me add a feature to PSI" PR has to update this test
+    AND amend ADR 0009. The four-raw-features shape isn't just a
+    choice — it's the load-bearing IID-friendly subset of
+    ``FEATURE_NAMES``; reintroducing the rolling features would
+    re-open the autocorrelation noise problem the ADR closes.
+    """
+    assert PSI_FEATURE_NAMES == (
+        "vibration_amp",
+        "bearing_temp",
+        "motor_current",
+        "rpm",
+    )
+
+
+def test_psi_feature_names_is_subset_of_feature_names():
+    """ADR 0009 structural invariant: every PSI surface name must
+    appear in ``FEATURE_NAMES`` (so the scorer-input dict that
+    ``extract_features`` produces can feed ``compute_psi`` without
+    additional key massaging).
+
+    A regression here means either:
+    - someone added a PSI-only feature that ``extract_features``
+      doesn't compute (PSI would KeyError at compute time), or
+    - the asymmetry was inverted (PSI got a superset, not subset).
+
+    Both are ADR 0009 violations. The strict-subset relation is the
+    architectural principle; the test catches both directions.
+    """
+    assert set(PSI_FEATURE_NAMES).issubset(set(FEATURE_NAMES)), (
+        f"PSI_FEATURE_NAMES has names not in FEATURE_NAMES: "
+        f"{set(PSI_FEATURE_NAMES) - set(FEATURE_NAMES)}. "
+        "ADR 0009 requires the PSI surface to be a strict subset of "
+        "the scorer input set."
+    )
+    # Strictness: PSI is genuinely smaller, not equal. If a future
+    # change unifies them, that's an ADR 0009 amendment, not a silent
+    # drop of this test.
+    assert len(PSI_FEATURE_NAMES) < len(FEATURE_NAMES), (
+        "PSI_FEATURE_NAMES is no longer a STRICT subset of "
+        "FEATURE_NAMES. ADR 0009's asymmetry has been erased; "
+        "update the ADR or revert."
     )
 
 

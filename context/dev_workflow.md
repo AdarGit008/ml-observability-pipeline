@@ -20,10 +20,11 @@ Bring this back to a `dev_workflow` session when **any** of these fire:
 - **2026-05-24 — Gemini loop:** Replaced `@google/gemini-cli` invocation with `scripts/gemini_review.{ps1,sh}` direct-API wrappers. Triggered mid-simulator-session by four CLI friction points (install, arg passing, trust folders, internal tool-call bug). See **ADR 0001**. PowerShell script then took four further debugging passes (encoding + cwd issues on PS 5.1) before running clean — all defended inline in the script.
 - **2026-05-24 — `.gitignore` deferred-decision retired:** Landed Python + Terraform `.gitignore` as the first commit of the 2026-05-24 simulator session.
 - **2026-05-25 — RPM-coupling spec deviation:** Not a dev_workflow change per se, but the first time we exercised the "PLAN.md ↔ ADR divergence" path from DEV_NORMS §9. See **ADR 0002**.
+- **2026-06-02 — Multi-provider review cascade:** Extended the Gemini-only review path to a cascading provider chain `gemini → openrouter → groq → cerebras`, with per-response provenance footers as the audit signature. Triggered mid-lambda_scorer-MVP-review by a hard `429 RESOURCE_EXHAUSTED` from Gemini's free tier + a 503 on flash fallback. See **ADR 0011**. `scripts/gemini_review.ps1` keeps its filename despite the broadened scope (ADR 0011 §Decision #5).
 
 ## Known deferred decisions (do not pre-optimize)
 - No Makefile / `scripts/new_session.sh` yet — only add if scaffolding by hand becomes the bottleneck.
-- No LICENSE / README yet — add when the repo first goes in front of a recruiter (i.e. when there's something to look at). Also fold one-time Gemini setup (API key) into this when it lands.
+- No LICENSE / README yet — add when the repo first goes in front of a recruiter (i.e. when there's something to look at). Also fold the one-time reviewer-model setup (API keys for whichever providers in the ADR 0011 cascade the PO has accounts on) into this when it lands.
 
 ## Interfaces (in / out)
 - **In:** PO feedback about what's slowing sessions down.
@@ -34,3 +35,4 @@ None blocking. Trigger conditions above cover when to revisit.
 
 ## Related ADRs
 - **ADR 0001** — direct Gemini API for reviews (workflow change).
+- **ADR 0011** — multi-provider review cascade + provenance audit (2026-06-02 extension of ADR 0001).

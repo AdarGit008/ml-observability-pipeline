@@ -43,6 +43,19 @@ import yaml
 # ``FeatureWindow``; the seconds-level value is the contract.
 FEATURE_WINDOW_SECONDS: float = 300.0
 
+# PSI rolling window length, in seconds. PLAN.md §2.7 and
+# ``context/_interfaces.md`` §"PSI parameters" pin this at 1 hour per
+# pump. Tick-to-samples conversion lives in the service orchestrator;
+# the seconds-level value is the contract. Locked in ADR 0007.
+PSI_WINDOW_SECONDS: float = 3600.0
+
+# PSI compute cadence, in seconds. ADR 0005 §Addendum 2026-05-29 Q3
+# carried this as an open question; ADR 0007 resolves it as "every Nth
+# tick where N corresponds to ~once per minute." At the default 2s
+# tick, that's every 30 ticks. The seconds-level value here is the
+# contract; ticks are derived via ``LocalRuntimeConfig.psi_period_ticks``.
+PSI_COMPUTE_EVERY_SECONDS: float = 60.0
+
 
 @dataclass(frozen=True)
 class MqttConfig:
@@ -90,6 +103,27 @@ class LocalRuntimeConfig:
         produce a window long enough to cover the full 5 minutes.
         """
         return max(1, math.ceil(FEATURE_WINDOW_SECONDS / self.tick_seconds))
+
+    @property
+    def psi_window_samples(self) -> int:
+        """PSI window length in samples = ceil(PSI_WINDOW_SECONDS / tick_seconds).
+
+        At the default 2-second tick this gives 1800 samples = exactly
+        1 hour of wall clock, per PLAN.md §2.7's "rolling 1-hour window
+        per pump."
+        """
+        return max(1, math.ceil(PSI_WINDOW_SECONDS / self.tick_seconds))
+
+    @property
+    def psi_period_ticks(self) -> int:
+        """How many ticks between PSI computations.
+
+        Derived from ``PSI_COMPUTE_EVERY_SECONDS``. At the default 2s
+        tick this gives 30 ticks ~ once per minute. See ADR 0007 for
+        the cadence rationale (every-tick = wasted CPU, separate
+        measurement = schema churn; every-Nth was the middle path).
+        """
+        return max(1, math.ceil(PSI_COMPUTE_EVERY_SECONDS / self.tick_seconds))
 
 
 class ConfigError(Exception):
@@ -223,7 +257,7 @@ def _assert_exact_keys(raw: dict[str, Any], expected: set[str], where: str) -> N
             parts.append(f"missing keys: {sorted(missing)}")
         if unknown:
             parts.append(f"unknown keys: {sorted(unknown)}")
-        raise ConfigError(f"{where} schema mismatch — " + "; ".join(parts))
+        raise ConfigError(f"{where} schema mismatch -- " + "; ".join(parts))
 
 
 def _as_float(value: Any, field: str) -> float:

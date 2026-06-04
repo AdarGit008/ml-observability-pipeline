@@ -50,6 +50,10 @@ import numpy as np
 # Feature names in stable order. Tests pin this — both as a guard against
 # accidental renames and because the InfluxDB writer iterates over the
 # dict and we want predictable column order in the TSDB.
+#
+# This is the SCORER input contract: ``shared.score.score`` consumes a
+# dict keyed by every name here. See ``PSI_FEATURE_NAMES`` below for the
+# drift surface contract (a strict subset of this tuple, per ADR 0009).
 FEATURE_NAMES: tuple[str, ...] = (
     "vibration_amp",
     "bearing_temp",
@@ -61,9 +65,35 @@ FEATURE_NAMES: tuple[str, ...] = (
     "bearing_temp_std_5m",
 )
 
+# Feature names the PSI drift surface iterates — a STRICT SUBSET of
+# ``FEATURE_NAMES`` (the scorer input set). Per ADR 0009: the four
+# rolling features are scorer inputs only, never PSI surface members,
+# because their 149/150-overlap windows violate PSI's IID assumption
+# and produce 0.10–0.40 autocorrelation noise on healthy fleets.
+#
+# Two related but distinct contracts:
+# - ``FEATURE_NAMES`` (8) — scorer input. ``score(features)`` consumes
+#   all eight; rolling features add temporal smoothing for prediction.
+# - ``PSI_FEATURE_NAMES`` (4) — drift surface. ``compute_psi`` iterates
+#   only the per-tick IID raw signals. The on-disk reference
+#   distribution's ``features`` map covers exactly this tuple.
+#
+# Pinned by ``test_psi_feature_names_is_subset_of_feature_names`` so a
+# "let me add a feature to PSI" regression has to update ADR 0009.
+PSI_FEATURE_NAMES: tuple[str, ...] = (
+    "vibration_amp",
+    "bearing_temp",
+    "motor_current",
+    "rpm",
+)
+
 # Raw signal fields the simulator publishes — see context/_interfaces.md
 # (Telemetry payload). Order doesn't matter functionally but is pinned
-# for predictability.
+# for predictability. Today this happens to equal ``PSI_FEATURE_NAMES``
+# (both are "the four raw sensors"), but they're conceptually distinct:
+# ``RAW_SIGNAL_FIELDS`` describes the simulator's wire format;
+# ``PSI_FEATURE_NAMES`` describes the drift surface. Keeping them as
+# separate constants lets one evolve without dragging the other along.
 RAW_SIGNAL_FIELDS: tuple[str, ...] = (
     "vibration_amp",
     "bearing_temp",

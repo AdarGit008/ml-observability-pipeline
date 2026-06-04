@@ -65,3 +65,13 @@ The script takes `-Slug` (and optional `-Model`, `-Date`), reads `review_packets
 - Session log: `docs/sessions/2026-05-24-simulator-pump-model.md` — captures the four friction points in real time.
 - Gemini REST API docs: https://ai.google.dev/api/generate-content
 - Gemini API keys: https://aistudio.google.com/apikey
+
+## Addendum 2026-06-02 — Multi-provider extension (ADR 0011)
+
+The 2026-06-02 lambda_scorer MVP review hit a hard `429 RESOURCE_EXHAUSTED` from Gemini's free tier (daily quota, not minute-scoped) followed by a 503 UNAVAILABLE on the flash-model fallback. Both failure modes were anticipated abstractly by this ADR but didn't have a recovery path: the script would exit non-zero, the session-done workflow stalled.
+
+**ADR 0011** closes the deferred line in §Alternatives C of this ADR ("Use a different LLM as reviewer — out of scope") by extending `scripts/gemini_review.ps1` with a cascading multi-provider chain: `gemini → openrouter → groq → cerebras`. All four providers serve as adversarial-but-fair reviewers (same role, same packet format, same "don't rubber-stamp" expectation per `DEV_NORMS §4`). The choice of which one ran on a given response is captured as a **provenance footer** on the response file (load-bearing audit signal, per ADR 0011 §Decision #3).
+
+This Addendum does not supersede the original Decision. The Gemini REST API is still the default first attempt; the script's filename is preserved (`gemini_review.ps1`) because it's a well-known entrypoint named across every past session's commit-draft sequence. ADR 0001's Consequences §"Capacity fallback baked in" originally meant "fall to Flash on 503"; ADR 0011 generalises this to "fall through providers on any error" — same posture, broader scope.
+
+See ADR 0011 for: the full provider chain, free-tier model defaults, env-var names, the provenance-footer convention, and the rationale for keeping the original filename.

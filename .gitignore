@@ -68,3 +68,6 @@ review_responses/*.request.json
 .idea/
 .DS_Store
 Thumbs.db
+
+# Lambda deploy staging (scripts/build_lambda.* output; archive_file input)
+.build/

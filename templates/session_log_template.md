@@ -2,7 +2,7 @@
 
 - **PO:** Adar
 - **Architect:** Claude
-- **Reviewer:** Gemini (CLI)
+- **Reviewer:** reviewer model from the cascade (see response file footer for provider + model; ADR 0011)
 - **Context loaded:** `_global`, `<component>`, [`_interfaces` if applicable]
 - **Duration:** ~Xh
 
@@ -19,8 +19,9 @@ One sentence. What did this session set out to do?
 ## Trade-offs surfaced
 - Things we deliberately chose, with the one-sentence rationale.
 
-## Gemini review highlights
-- Top 2–3 things Gemini flagged.
+## Reviewer feedback highlights
+- Top 2–3 things the reviewer flagged.
+- Note the response's provenance footer (which provider + model wrote it — per ADR 0011) so the weighting is recoverable later.
 - Whether they were addressed, deferred, or rejected (with reason).
 - Link to `review_packets/...` and `review_responses/...`.
 

@@ -3,11 +3,24 @@
 Pins:
 - build_point shape (measurement, tags, fields, time).
 - pump_id is a tag (not a field).
-- All 8 features + score + 8 PSI fields land as flat numeric fields.
+- All 8 features + score + 4 PSI fields land as flat numeric fields on
+  compute ticks; psi=None tick omits psi_* fields entirely.
+  Field count: 13 on compute ticks (ADR 0009 shrank PSI surface 8→4),
+  9 on non-compute ticks (unchanged).
 - Timestamp is normalized to UTC.
 - The writer uses ``InfluxDBClientAsync`` (native async, per Gemini Q4
-  of the 2026-05-29 review) — not the sync client wrapped in
+  of the 2026-05-29 review) -- not the sync client wrapped in
   ``asyncio.to_thread``. Tests inject an async-context-manager fake.
+
+Drift session 2026-06-01 added the psi=None case (ADR 0007 every-Nth-
+tick cadence -- non-compute ticks carry no PSI, the writer omits the
+fields so InfluxDB stores nulls).
+
+ADR 0009 (2026-06-03) shrank the PSI surface to 4 raw features. The
+``psi_*`` field set goes from 8 to 4: ``psi_vibration_amp_mean_5m``,
+``psi_vibration_amp_std_5m``, ``psi_bearing_temp_mean_5m``, and
+``psi_bearing_temp_std_5m`` are no longer emitted. The 17-field-per-
+point assertion becomes a 13-field assertion.
 """
 
 from __future__ import annotations
@@ -25,11 +38,14 @@ from local_runtime.influx_writer import (
     ScoredRow,
     build_point,
 )
-from shared.features import FEATURE_NAMES
+from shared.features import FEATURE_NAMES, PSI_FEATURE_NAMES
 
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+_SENTINEL = object()
 
 
 def _features_all_set(default: float = 1.0) -> dict[str, float]:
@@ -37,7 +53,8 @@ def _features_all_set(default: float = 1.0) -> dict[str, float]:
 
 
 def _psi_all_set(default: float = 0.05) -> dict[str, float]:
-    return {name: default for name in FEATURE_NAMES}
+    """PSI dict covering exactly ``PSI_FEATURE_NAMES`` (4 keys, ADR 0009)."""
+    return {name: default for name in PSI_FEATURE_NAMES}
 
 
 def _row(
@@ -45,14 +62,18 @@ def _row(
     ts: datetime | None = None,
     features: dict[str, float] | None = None,
     score: float = 0.42,
-    psi: dict[str, float] | None = None,
+    psi=_SENTINEL,
 ) -> ScoredRow:
+    # Sentinel rather than ``psi or default`` so callers can pass
+    # ``psi=None`` explicitly without it being replaced by the default
+    # dict -- needed for the non-compute-tick test below.
+    psi_value = _psi_all_set() if psi is _SENTINEL else psi
     return ScoredRow(
         pump_id=pump_id,
         timestamp=ts or datetime(2026, 5, 29, 12, 0, 0, tzinfo=timezone.utc),
         features=features or _features_all_set(),
         score=score,
-        psi=psi or _psi_all_set(),
+        psi=psi_value,
     )
 
 
@@ -73,7 +94,12 @@ def test_build_point_pump_id_is_tag_not_field():
 
 
 def test_build_point_all_eight_features_as_fields():
-    """All 8 FEATURE_NAMES land as float fields with the right names."""
+    """All 8 FEATURE_NAMES land as float fields with the right names.
+
+    ADR 0009 only shrinks the PSI surface, not the feature dump --
+    the model still consumes all 8 features, and Grafana panels read
+    raw rolling-feature values without PSI on them.
+    """
     point = build_point(_row())
     for name in FEATURE_NAMES:
         assert name in point["fields"], f"missing feature field {name!r}"
@@ -86,21 +112,78 @@ def test_build_point_score_as_field():
 
 
 def test_build_point_psi_fields_prefixed():
-    """PSI values land as flat psi_<feature> fields, not nested."""
-    point = build_point(_row(psi={name: 0.1 + i for i, name in enumerate(FEATURE_NAMES)}))
-    for i, name in enumerate(FEATURE_NAMES):
+    """PSI values land as flat psi_<feature> fields, not nested.
+    Per ADR 0009 only the 4 PSI surface names get psi_ fields."""
+    psi_in = {name: 0.1 + i for i, name in enumerate(PSI_FEATURE_NAMES)}
+    point = build_point(_row(psi=psi_in))
+    for i, name in enumerate(PSI_FEATURE_NAMES):
         key = f"psi_{name}"
         assert key in point["fields"]
         assert point["fields"][key] == pytest.approx(0.1 + i)
 
 
+def test_build_point_psi_fields_do_not_include_rolling_features():
+    """ADR 0009: psi_<rolling-feature> fields are NOT emitted.
+
+    A regression here would re-introduce the autocorrelation noise
+    that ADR 0009 closes by dropping the rolling features from the
+    PSI surface entirely.
+    """
+    point = build_point(_row())
+    rolling_features = (
+        "vibration_amp_mean_5m",
+        "vibration_amp_std_5m",
+        "bearing_temp_mean_5m",
+        "bearing_temp_std_5m",
+    )
+    for name in rolling_features:
+        assert f"psi_{name}" not in point["fields"], (
+            f"psi_{name} should not be emitted (ADR 0009 PSI surface "
+            f"is PSI_FEATURE_NAMES = {PSI_FEATURE_NAMES})"
+        )
+
+
 def test_build_point_missing_psi_feature_defaults_to_zero():
-    """A sparse PSI dict (only the warning band) gets zeroes for the rest."""
+    """A sparse PSI dict (only the warning band) gets zeroes for the
+    other PSI surface names. Rolling features are not in the output
+    regardless."""
     point = build_point(_row(psi={"vibration_amp": 0.18}))
     assert point["fields"]["psi_vibration_amp"] == 0.18
-    for name in FEATURE_NAMES:
+    for name in PSI_FEATURE_NAMES:
         if name != "vibration_amp":
             assert point["fields"][f"psi_{name}"] == 0.0
+
+
+def test_build_point_psi_none_omits_psi_fields():
+    """When psi is None (non-compute tick under ADR 0007 cadence),
+    build_point omits all psi_* fields so InfluxDB stores nulls.
+    Grafana's ``last`` aggregator then surfaces the most recent
+    computed value rather than snapping to 0 between computes."""
+    point = build_point(_row(psi=None))
+    for name in PSI_FEATURE_NAMES:
+        assert f"psi_{name}" not in point["fields"], (
+            f"psi_{name} should not be present when row.psi is None"
+        )
+    # Features + score still present.
+    for name in FEATURE_NAMES:
+        assert name in point["fields"]
+    assert "score" in point["fields"]
+
+
+def test_build_point_field_count_with_psi():
+    """8 features + score + 4 psi_ = 13 fields on a compute tick
+    (ADR 0009 surface shrink; was 17 pre-ADR-0009). Pinned so a stray
+    field addition shows up loudly in the test diff."""
+    point = build_point(_row())
+    assert len(point["fields"]) == 13
+
+
+def test_build_point_field_count_without_psi():
+    """8 features + score = 9 fields on a non-compute tick (psi=None).
+    Unchanged by ADR 0009 — the psi_* fields are already omitted in
+    this branch."""
+    point = build_point(_row(psi=None))
+    assert len(point["fields"]) == 9
 
 
 def test_build_point_missing_feature_raises_keyerror():
@@ -132,18 +215,11 @@ def test_build_point_converts_non_utc_tz():
     assert point["time"].utcoffset().total_seconds() == 0
 
 
-def test_build_point_total_field_count():
-    """8 features + score + 8 psi_ = 17 fields. Pinned so a stray field
-    addition shows up loudly in the test diff."""
-    point = build_point(_row())
-    assert len(point["fields"]) == 17
-
-
 # -- InfluxWriter (with async-context fake client) -------------------------
 
 
 class FakeWriteApi:
-    """Async fake — mirrors WriteApiAsync.write signature.
+    """Async fake -- mirrors WriteApiAsync.write signature.
 
     Per Gemini Q4 (2026-05-29 review), the real WriteApiAsync.write
     is async def. The fake matches that shape so tests exercise the
@@ -256,7 +332,7 @@ def test_writer_enters_underlying_client_context(cfg):
 
 def test_writer_aexit_exits_async_client_context(cfg):
     """The underlying InfluxDBClientAsync's __aexit__ closes the aiohttp
-    session — we just delegate. Pin that we delegate."""
+    session -- we just delegate. Pin that we delegate."""
     writer = InfluxWriter(cfg, client_factory=FakeClient)
 
     async def _go():
