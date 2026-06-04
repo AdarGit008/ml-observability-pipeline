@@ -1,9 +1,19 @@
-# Deploy-zip dependencies for the scorer Lambda (IaC session 2026-06-04).
-# Subset of the repo requirements.txt — ONLY what lambda_scorer +
-# shared/ import at runtime. scipy + threadpoolctl arrive transitively
-# with scikit-learn. boto3 is intentionally absent: the Lambda runtime
-# provides it, and bundling botocore would push the zip past the 50 MB
-# direct-upload limit (see scripts/build_lambda.* header).
-numpy>=1.26
-scikit-learn>=1.4
-joblib>=1.3
+# Deploy-zip dependencies for the scorer Lambda (IaC session 2026-06-04;
+# pinned 2026-06-04 cold-path session). Subset of the repo
+# requirements.txt — ONLY what lambda_scorer + shared/ import at
+# runtime. scipy + threadpoolctl arrive transitively with
+# scikit-learn. boto3 is intentionally absent: the Lambda runtime
+# provides it, and bundling botocore would push the zip past the
+# 50 MB direct-upload limit (see scripts/build_lambda.* header).
+#
+# PINNED == the PO venv that trained model.pkl. The first real Docker
+# smoke-check run (2026-06-04) surfaced an InconsistentVersionWarning:
+# the old manylinux2014 platform cap resolved sklearn 1.7.2 while the
+# pickle was written by 1.9.0 — newer-pickle-into-older-sklearn is the
+# unsupported direction. The build scripts now request manylinux_2_28
+# wheels (Lambda python3.12 = AL2023, glibc 2.34 — compatible), so
+# these pins are installable. Retraining bumps these pins in the same
+# commit as the new model.pkl.
+numpy==2.4.6
+scikit-learn==1.9.0
+joblib==1.5.3

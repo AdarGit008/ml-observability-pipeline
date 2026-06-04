@@ -16,7 +16,16 @@
 #   - Lambda                pump-dashboard-adapter  (+ log group,
 #                           + Function URL)         (adapter session)
 #   - IoT topic rule        pump_telemetry_to_scorer
-#   - IAM roles/policies    pump-scorer-exec, pump-dashboard-adapter-exec
+#   - IAM roles/policies    pump-scorer-exec, pump-dashboard-adapter-exec,
+#                           pump-s3-batcher-exec,
+#                           pump_telemetry_to_scorer_error_republish
+#
+# Cold path (ADR 0015, cold-path session 2026-06-04):
+#   - S3 bucket             <project>-pump-archive-<account-id>
+#                           (force_destroy empties it; sweep proves absence)
+#   - Glue database/table   pump_archive / pump_readings
+#   - Lambda                pump-s3-batcher (+ log group)
+#   - EventBridge rule      pump-s3-batcher-schedule
 #
 # Also re-checks the $1/$5 budget-alert posture (ACCOUNT_SETUP.md) —
 # teardown is the natural moment to notice a deleted budget.
@@ -27,7 +36,8 @@
 #
 # Usage:  ./scripts/aws_teardown.sh [--destroy-only | --verify-only]
 # Env overrides (defaults match infra/variables.tf):
-#   DDB_TABLE_NAME, SCORER_FN, ADAPTER_FN, SNS_TOPIC_NAME, IOT_RULE_NAME
+#   DDB_TABLE_NAME, SCORER_FN, ADAPTER_FN, BATCHER_FN, SNS_TOPIC_NAME,
+#   IOT_RULE_NAME, GLUE_DB_NAME, GLUE_TABLE_NAME, PROJECT_TAG, BUCKET_NAME
 set -uo pipefail
 
 REGION="eu-central-1" # hard constraint #5 — do not parameterise
@@ -38,6 +48,11 @@ SCORER_FN="${SCORER_FN:-pump-scorer}"
 ADAPTER_FN="${ADAPTER_FN:-pump-dashboard-adapter}"
 SNS_TOPIC_NAME="${SNS_TOPIC_NAME:-ml-obs-pipeline-pump-alerts}"
 IOT_RULE_NAME="${IOT_RULE_NAME:-pump_telemetry_to_scorer}"
+BATCHER_FN="${BATCHER_FN:-pump-s3-batcher}"
+GLUE_DB_NAME="${GLUE_DB_NAME:-pump_archive}"
+GLUE_TABLE_NAME="${GLUE_TABLE_NAME:-pump_readings}"
+PROJECT_TAG="${PROJECT_TAG:-ml-obs-pipeline}"
+# BUCKET_NAME is account-suffixed — resolved after the sts call below.
 
 MODE="${1:-full}" # full | --destroy-only | --verify-only
 FAILURES=0
@@ -52,6 +67,9 @@ command -v aws >/dev/null 2>&1 || { say "aws CLI not found on PATH"; exit 2; }
 
 ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text 2>/dev/null)" \
   || { say "aws sts get-caller-identity failed — credentials not configured?"; exit 2; }
+
+# Deterministic bucket name (infra/modules/s3_archive naming rule).
+BUCKET_NAME="${BUCKET_NAME:-${PROJECT_TAG}-pump-archive-${ACCOUNT_ID}}"
 
 # ---------------------------------------------------------------- destroy
 if [ "$MODE" != "--verify-only" ]; then
@@ -102,7 +120,7 @@ else
   ok "no SNS subscriptions for $SNS_TOPIC_NAME"
 fi
 
-for FN in "$SCORER_FN" "$ADAPTER_FN"; do
+for FN in "$SCORER_FN" "$ADAPTER_FN" "$BATCHER_FN"; do
   if aws lambda get-function --function-name "$FN" \
        --region "$REGION" >/dev/null 2>&1; then
     fail "Lambda $FN still exists"
@@ -133,13 +151,43 @@ else
   ok "IoT rule $IOT_RULE_NAME gone"
 fi
 
-for ROLE in "${SCORER_FN}-exec" "${ADAPTER_FN}-exec"; do
+for ROLE in "${SCORER_FN}-exec" "${ADAPTER_FN}-exec" "${BATCHER_FN}-exec" \
+            "${IOT_RULE_NAME}_error_republish"; do
   if aws iam get-role --role-name "$ROLE" >/dev/null 2>&1; then
     fail "IAM role $ROLE still exists"
   else
     ok "IAM role $ROLE gone"
   fi
 done
+
+# ---------------------------------------------- cold-path sweep (ADR 0015)
+if aws s3api head-bucket --bucket "$BUCKET_NAME" >/dev/null 2>&1; then
+  OBJ_COUNT="$(aws s3api list-objects-v2 --bucket "$BUCKET_NAME" \
+      --query 'KeyCount' --output text 2>/dev/null)"
+  fail "S3 bucket $BUCKET_NAME still exists (${OBJ_COUNT:-?} objects) — force_destroy should have emptied AND removed it"
+else
+  ok "S3 bucket $BUCKET_NAME gone"
+fi
+
+if aws glue get-database --name "$GLUE_DB_NAME" --region "$REGION" >/dev/null 2>&1; then
+  fail "Glue database $GLUE_DB_NAME still exists"
+else
+  ok "Glue database $GLUE_DB_NAME gone"
+fi
+
+if aws glue get-table --database-name "$GLUE_DB_NAME" --name "$GLUE_TABLE_NAME" \
+     --region "$REGION" >/dev/null 2>&1; then
+  fail "Glue table $GLUE_DB_NAME.$GLUE_TABLE_NAME still exists"
+else
+  ok "Glue table $GLUE_DB_NAME.$GLUE_TABLE_NAME gone"
+fi
+
+if aws events describe-rule --name "${BATCHER_FN}-schedule" \
+     --region "$REGION" >/dev/null 2>&1; then
+  fail "EventBridge rule ${BATCHER_FN}-schedule still exists"
+else
+  ok "EventBridge rule ${BATCHER_FN}-schedule gone"
+fi
 
 # -------------------------------------------------- budget-alert posture
 # The $1/$5 alerts (ACCOUNT_SETUP.md) must OUTLIVE every teardown —

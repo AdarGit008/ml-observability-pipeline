@@ -13,7 +13,7 @@ Layout produced (zip root == /var/task in Lambda):
   lambda_scorer/            handler (tests stripped)
   model/artifacts/          model.pkl + reference JSON, exactly where
                             shared/drift.py resolves them
-  numpy/ sklearn/ scipy/... manylinux2014_x86_64 wheels (Lambda runs
+  numpy/ sklearn/ scipy/... manylinux wheels (Lambda runs
                             x86_64 Linux — Windows wheels won't load)
 
 boto3 NOT bundled: the Lambda runtime provides it; botocore would
@@ -33,9 +33,15 @@ Write-Host "==> Staging into $Dist"
 if (Test-Path $Dist) { Remove-Item -Recurse -Force $Dist }
 New-Item -ItemType Directory -Force -Path $Dist | Out-Null
 
-Write-Host "==> Installing deps (manylinux2014_x86_64, cp312, binary-only)"
+Write-Host "==> Installing deps (manylinux_2_28/manylinux2014 x86_64, cp312, binary-only)"
+# manylinux_2_28 added 2026-06-04: sklearn 1.9.0 (the model.pkl
+# training version - see lambda_requirements.txt pins) ships no
+# manylinux2014 wheel. Lambda python3.12 = AL2023 (glibc 2.34), so
+# manylinux_2_28 wheels run fine. Both tags accepted; pip picks the
+# best compatible wheel per package.
 & $Python -m pip install --quiet --upgrade `
     --target $Dist `
+    --platform manylinux_2_28_x86_64 `
     --platform manylinux2014_x86_64 `
     --implementation cp `
     --python-version 3.12 `
@@ -54,9 +60,15 @@ Copy-Item (Join-Path $RepoRoot "model\artifacts\operational_reference_distributi
           (Join-Path $Dist "model\artifacts\")
 
 Write-Host "==> Stripping __pycache__ + vendored tests (ADR 0006 §Q4 convention)"
+# numpy is EXEMPT from the tests strip: numpy.testing imports
+# numpy._core.tests._natype at module level (numpy 2.4.x), and scipy's
+# array_api_compat does `from numpy import *`, which triggers
+# numpy.testing during the handler's cold-start import chain.
+# Stripping numpy's tests breaks that import - caught by the Docker
+# smoke-check on its first real run (2026-06-04 cold-path session).
 Get-ChildItem -Path $Dist -Recurse -Directory -Force |
-    Where-Object { $_.Name -in @("__pycache__", "tests") } |
-    Remove-Item -Recurse -Force
+    Where-Object { $_.Name -eq "__pycache__" -or ($_.Name -eq "tests" -and $_.FullName -notmatch "\\numpy\\") } |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
 $SizeMB = [math]::Round((Get-ChildItem -Path $Dist -Recurse -File |
     Measure-Object -Sum Length).Sum / 1MB)

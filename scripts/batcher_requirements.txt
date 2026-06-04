@@ -1,0 +1,6 @@
+# Cold-path batcher deps (ADR 0015 §Decision 2): pyarrow alone — no
+# pandas, no awswrangler. boto3 is NOT here on purpose: the Lambda
+# runtime provides it (infra session #1 lock; bundling botocore blows
+# the 50 MB direct-upload zip limit).
+# Pinned to the version the moto suite ran against (2026-06-04).
+pyarrow==24.0.0

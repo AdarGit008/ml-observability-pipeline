@@ -7,9 +7,16 @@
 # that staged tree. Run the build script before terraform plan.
 #
 # boto3 is intentionally NOT bundled — the Lambda Python runtime
-# provides it, and bundling botocore would push the zip past the
-# 50 MB direct-upload limit (footprint discussion: session log
-# 2026-06-04 + ADR 0006 §Q4 baseline ~124 MB unzipped).
+# provides it (footprint discussion: session log 2026-06-04 + ADR
+# 0006 §Q4).
+#
+# Code upload goes VIA S3 (2026-06-04 cold-path session): the first
+# real measured zip came out at 62 MB — over the 50 MB direct-upload
+# limit (the ADR 0006 §Q4 anticipated fallback). aws_s3_object pushes
+# the zip to the archive bucket under deploy/ (outside the Glue
+# year=* projection paths, so Athena never sees it; the bucket's
+# force_destroy sweeps it at teardown), and the function references
+# s3_bucket/s3_key. source_code_hash still drives change detection.
 #
 # AWS_REGION is a reserved Lambda env var set by the runtime
 # (eu-central-1 here) — Terraform must not (and cannot) set it; the
@@ -38,6 +45,13 @@ resource "aws_cloudwatch_log_group" "scorer" {
   retention_in_days = 7
 }
 
+resource "aws_s3_object" "code" {
+  bucket = var.code_bucket
+  key    = "deploy/${var.function_name}.zip"
+  source = data.archive_file.dist.output_path
+  etag   = data.archive_file.dist.output_md5 # re-upload when the zip changes
+}
+
 resource "aws_lambda_function" "scorer" {
   function_name = var.function_name
   role          = var.role_arn
@@ -48,7 +62,8 @@ resource "aws_lambda_function" "scorer" {
   memory_size = var.memory_mb
   timeout     = var.timeout_s
 
-  filename         = data.archive_file.dist.output_path
+  s3_bucket        = aws_s3_object.code.bucket
+  s3_key           = aws_s3_object.code.key
   source_code_hash = data.archive_file.dist.output_base64sha256
 
   environment {

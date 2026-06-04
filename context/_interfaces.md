@@ -2,7 +2,7 @@
 
 Load this when work crosses component boundaries (e.g., simulator → scorer, scorer → batcher). Keep schemas authoritative here; component files reference, don't duplicate.
 
-> **Status:** All shapes below are resolved and live except the AWS-mode reference bundling location (HANDOFF §6 Q4 — open). Grafana adapter contract resolved 2026-06-04 by ADR 0014.
+> **Status:** All shapes below are resolved and live except the AWS-mode reference bundling location (HANDOFF §6 Q4 — open). Grafana adapter contract resolved 2026-06-04 by ADR 0014; cold-path batcher contract (WATERMARK row + archive layout mechanics) resolved 2026-06-04 by ADR 0015.
 
 ## MQTT topic pattern
 ```
@@ -10,6 +10,7 @@ factory/pumps/{pump_id}/telemetry
 ```
 - `pump_id` format: `P-NN` zero-padded (e.g., `P-07`).
 - One Thing per pump in AWS mode; one client per pump in local mode.
+- **Error topic (ADR 0015 session):** `factory/errors` — the IoT Rule's `error_action` republishes messages whose scorer invoke failed past IoT's retries.
 
 ## Telemetry payload (JSON)
 Published by simulator on the topic above.
@@ -29,7 +30,7 @@ Published by simulator on the topic above.
 - The numeric values above are illustrative only — they do NOT necessarily fall inside the operational reference distribution's per-feature ranges (ADR 0008 demo-paced HEALTHY baseline). Tests that need PSI-healthy windows must sample the reference's own bin ranges, not these example values (see `lambda_scorer/tests/test_handler.py §PSI window mechanics`).
 
 ## DynamoDB schema
-> **Resolved 2026-06-02 by ADR 0010.** Option A with a STATE-row sibling: one row per reading keyed `(pump_id, <ISO-8601 ts>)` for history, one row per pump keyed `(pump_id, "STATE")` for the latest snapshot. PSI follow-on (2026-06-02) landed the pre-authorized STATE-row extension: `latest_psi`, `alert_flag`, `last_alert_sent_at` (ADR 0012).
+> **Resolved 2026-06-02 by ADR 0010.** Option A with a STATE-row sibling: one row per reading keyed `(pump_id, <ISO-8601 ts>)` for history, one row per pump keyed `(pump_id, "STATE")` for the latest snapshot. PSI follow-on (2026-06-02) landed the pre-authorized STATE-row extension: `latest_psi`, `alert_flag`, `last_alert_sent_at` (ADR 0012). **Cold path (2026-06-04, ADR 0015) added a second reserved SK: `(pump_id, "WATERMARK")` — the batcher's per-pump checkpoint.**
 
 ### Reading row
 ```
@@ -61,6 +62,25 @@ last_alert_sent_at = <ISO-8601 ts>
                           # (ADR 0012 — no null sentinel).
 ```
 
+### WATERMARK row (ADR 0015)
+```
+PK = pump_id
+SK = "WATERMARK"
+last_cutoff = <ISO-8601 ts>   # hi bound of the last successful batch;
+                              # the next batch drains (last_cutoff, cutoff]
+updated_at  = <ISO-8601 ts>   # batcher invocation time
+```
+One row per pump, written by `lambda_s3_batcher` only — and only
+after a successful S3 put (at-least-once; never regresses). ABSENT
+until the pump's first archived batch (epoch lower bound applies).
+
+### Reserved-SK coexistence (ADR 0010 rule, extended by ADR 0015)
+ISO-8601 timestamps start with year digits; `"STATE"` and
+`"WATERMARK"` start with letters. The hot path's `SK begins_with "2"`
+predicate excludes BOTH reserved rows; the batcher's BETWEEN range
+(timestamps on both ends) excludes them too. Any future SK convention
+must coexist with both.
+
 ### Access patterns
 
 | Pattern | Operation |
@@ -70,8 +90,11 @@ last_alert_sent_at = <ISO-8601 ts>
 | Hot path: edge-trigger read | `GetItem(PK=pump_id, SK="STATE")` immediately before the STATE overwrite — previous `alert_flag` (publish gate) + `last_alert_sent_at` carry-forward (ADR 0012) |
 | Hot path: overwrite STATE | `PutItem` on the STATE row |
 | Dashboards: fleet latest | `BatchGetItem` across the `FLEET_SIZE` STATE keys — the adapter's ONLY operation (ADR 0014; IAM grants nothing else) |
+| Cold path: read watermarks | `BatchGetItem` across the `FLEET_SIZE` WATERMARK keys — one call per batch (ADR 0015) |
+| Cold path: drain new readings | Per pump, `Query(PK=pump_id, SK BETWEEN <last_cutoff + "0"> AND <cutoff>)` — the suffix makes the inclusive lower bound exclusive (ADR 0015 §Decision 1) |
+| Cold path: advance watermark | `PutItem` on the WATERMARK row, after the S3 put succeeds |
 
-The `SK begins_with "2"` predicate filters out the STATE row (ISO-8601 timestamps start with year digits; `"STATE"` starts with `S`). Reading PutItem + STATE PutItem are NOT issued via `TransactWriteItems` — see ADR 0010 §Item ordering for the rationale.
+Reading PutItem + STATE PutItem are NOT issued via `TransactWriteItems` — see ADR 0010 §Item ordering. The S3 put + WATERMARK PutItems are likewise non-transactional — see ADR 0015 §Consequences (duplicates possible, loss not).
 
 ## Lambda scorer event envelope
 From IoT Rule trigger. Standard IoT message + rule metadata. The handler should treat the inner payload as the MQTT body above.
@@ -85,11 +108,16 @@ Per invocation (PSI follow-on landed 2026-06-02):
 - SNS publish on the False → True `alert_flag` flip only (ADR 0012; payload per §SNS alert payload below).
 
 ## S3 archive layout
+> **Mechanics locked 2026-06-04 by ADR 0015.**
 ```
-s3://<bucket>/year=YYYY/month=MM/day=DD/hour=HH/<batch>.parquet
+s3://<bucket>/year=YYYY/month=MM/day=DD/hour=HH/<compact-cutoff>.parquet
 ```
-- One Parquet file per minute (from EventBridge-triggered batcher).
-- Glue Catalog table defined in `infra/modules/glue_catalog/`, no Crawler.
+- Bucket: `<project_tag>-pump-archive-<account-id>` (deterministic; `force_destroy = true`).
+- The bucket also carries a **`deploy/` prefix** holding both Lambda zips (2026-06-04: the scorer zip measured 62 MB > the 50 MB direct-upload limit — ADR 0006 §Q4 fallback; the batcher rides the same mechanism). `deploy/` sits outside the Glue `year=*` projection paths, so Athena never reads it; `force_destroy` sweeps it.
+- One Parquet file per non-empty batch (60 s EventBridge cadence). Partition values derive from the batch cutoff (UTC); the filename is the cutoff with `-`/`:`/`.` stripped (e.g. `20260604T143200123Z.parquet`) — unique because cutoffs strictly advance.
+- Columns (= `lambda_s3_batcher.handler.PARQUET_SCHEMA` = the Glue table): `pump_id string, ts string, vibration_amp double, bearing_temp double, motor_current double, rpm double, score double`. `ts` is the reading row's sort key, verbatim.
+- Glue Catalog table defined in `infra/modules/glue_catalog/`, **no Crawler** — partition projection computes partitions from query predicates; nothing registers them.
+- At-least-once: duplicate `(pump_id, ts)` pairs may span two files after a put/watermark partial failure; consumers dedupe on that key.
 
 ## Reference distribution (PSI baseline)
 - File: `model/artifacts/operational_reference_distribution.json` (ADR 0008 operational; 4-feature PSI surface per ADR 0009).
