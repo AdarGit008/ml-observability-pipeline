@@ -25,6 +25,11 @@ Coverage:
   Decimal map (ADR 0009 surface pinned); SNS publishes exactly once
   on a False→True alert edge (ADR 0012), with no publish on healthy
   invocations and no re-publish while a breach persists.
+- Publish-failure ordering (ADR 0012 at-most-once pin): a publish
+  that raises surfaces as an invocation error AFTER the STATE row
+  landed (``alert_flag=True`` + ``last_alert_sent_at`` set), and the
+  IoT-Rule-style retry does NOT re-publish — the email is lost, the
+  failure is loud.
 
 The moto-backed tests use the ``fresh_handler`` fixture defined in
 ``conftest.py``. SNS publish assertions stub the handler's module-
@@ -600,3 +605,49 @@ def test_sns_no_republish_when_still_breached(fresh_handler):
     assert state["latest_ts"] == ts_second
     # last_alert_sent_at still names the FIRST invocation.
     assert state["last_alert_sent_at"] == ts_first
+
+
+def test_sns_publish_failure_is_loud_and_at_most_once(fresh_handler):
+    """Pin ADR 0012 §Decision 3 / §Consequences: publish AFTER the
+    STATE write, at-most-once per edge.
+
+    A breaching invocation whose SNS publish raises must (a) error
+    loudly — the exception propagates out of the handler so Lambda
+    marks the invocation failed in CloudWatch — and (b) leave the
+    STATE row ALREADY landed with ``alert_flag=True`` and
+    ``last_alert_sent_at`` set. Consequence (the trade-off the ADR
+    accepts): the retry re-runs against ``prev alert_flag == True``
+    and does NOT re-publish — the email is lost-but-loud. A refactor
+    that silently flips to publish-before-write would fail (b): the
+    raise would happen before the STATE row lands.
+    """
+    handler_mod, table = fresh_handler
+    sns_stub = mock.MagicMock()
+    sns_stub.publish.side_effect = RuntimeError("SNS unavailable")
+    handler_mod._SNS = sns_stub
+
+    _seed_readings(table, 10, values=_EXTREME)
+    ts = "2026-06-02T14:32:01.123Z"
+
+    # (a) Loud: the publish failure propagates as an invocation error.
+    with pytest.raises(RuntimeError, match="SNS unavailable"):
+        handler_mod.handler(_telemetry(ts=ts, **_EXTREME))
+    assert sns_stub.publish.call_count == 1
+
+    # (b) The STATE row landed BEFORE the failed publish: the alert
+    # state says "told" even though no email went out.
+    state = _get_state(table)
+    assert state["alert_flag"] is True
+    assert state["last_alert_sent_at"] == ts
+
+    # Retry semantics: the IoT-Rule retry re-runs the same event. It
+    # now sees prev alert_flag == True — no rising edge — so even a
+    # healthy SNS client is not asked to publish again. At-most-once.
+    sns_stub.publish.side_effect = None
+    retried = handler_mod.handler(_telemetry(ts=ts, **_EXTREME))
+    assert retried["alert_flag"] is True
+    assert sns_stub.publish.call_count == 1  # still just the failed attempt
+
+    state = _get_state(table)
+    assert state["alert_flag"] is True
+    assert state["last_alert_sent_at"] == ts

@@ -15,7 +15,7 @@ Local-mode equivalent of `lambda_scorer`. Subscribes to Mosquitto, runs *the sam
 ## Interfaces (in / out)
 - **In:** MQTT subscribe to `factory/pumps/+/telemetry` on `localhost:1883` — ONE connection, wildcard subscription (see ADR 0005).
 - **Out:** Writes to local InfluxDB v2 (`localhost:8086`) via the native async client (`InfluxDBClientAsync`). Measurement `pump_telemetry`, tag `pump_id`, **13 numeric fields per point on compute ticks (8 features + score + 4 PSI per ADR 0009; was 17 with 8 PSI pre-ADR-0009); 9 fields on non-compute ticks** (psi_* omitted so InfluxDB stores nulls — ADR 0007 §5). Schema pinned in ADR 0005 §3 with the ADR 0009 amendment.
-- **Shared logic:** Imports `shared.features`, `shared.score`, `shared.drift` — same import path as the future `lambda_scorer`. Divergence is a bug.
+- **Shared logic:** Imports `shared.features`, `shared.score`, `shared.drift` — same import path as `lambda_scorer`. Divergence is a bug.
 
 ## Mode parity invariant
 For the same input stream, local mode and AWS mode must produce the same per-message scores and PSI values within floating-point tolerance.

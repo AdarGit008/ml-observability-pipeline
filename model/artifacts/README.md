@@ -1,6 +1,15 @@
 # model/artifacts/
 
-Committed artifacts here are the **sandbox pipeline-validation build** (12-pump training corpus). The production canonical is regenerated **natively at 30 pumps** by the PO — the sandbox runs the smaller corpus to fit the resource-constrained environment (a few seconds of CPU per pump), then PO re-runs at full scale on the workstation. Both builds carry the same `model_version` (`v0.1.0-seed-0`) and both validate via `shared.drift.load_reference` because they share the 4-element `feature_names` per ADR 0009. Held-out AUC stays in the 0.997–0.998 band either way — well above the 0.85 threshold (ADR 0006).
+Committed artifacts here are the **PO-native canonical build** (30-pump training corpus, `--seed 0`), regenerated on the Windows workstation. The sandbox runs a smaller 12-pump corpus for pipeline validation only — those builds never land in git (see §Commit policy). Both builds carry the same `model_version` (`v0.1.0-seed-0`) and both validate via `shared.drift.load_reference` because they share the 4-element `feature_names` per ADR 0009. Held-out AUC stays in the 0.997–0.998 band either way — well above the 0.85 threshold (ADR 0006).
+
+## Commit policy (PO decision, 2026-06-04)
+
+**Only PO-native canonical builds get committed.** Rationale: committed artifacts keep a fresh clone green (`pytest` passes out of the box — the right out-of-box experience for a portfolio repo), but sandbox-built artifacts carry sklearn-version skew risk (MVP review Q6), so they are excluded from staging.
+
+- A session (sandbox or otherwise) that rebuilds `model.pkl` / `operational_reference_distribution.json` for validation purposes must NOT stage those files. Before the session's commit, the PO regenerates natively: `python -m model.train --n-pumps 30 --seed 0`.
+- The pre-commit `git diff --cached --name-status` check in the canonical staging sequence (DEV_NORMS §7) is the enforcement point: artifact paths in the staged set are only acceptable when the PO ran the regen that produced them.
+- No `.gitignore` entry — the files stay tracked; the policy governs *which build* of them gets staged.
+- Version-skew expectation: a validation environment running an OLDER sklearn than the build environment emits `InconsistentVersionWarning` on unpickle (forward-unpickle is sklearn's riskier direction). Suite-green is the acceptance bar; the warning lives in the validation env, never in the artifact. (2026-06-04 review P4.)
 
 ## Two pump counts, two purposes
 
@@ -19,10 +28,10 @@ So a single invocation produces both files: `model.pkl` reflects the `--n-pumps`
 ## Regenerate
 
 ```bash
-# Production (PO, Windows-native — the canonical build)
+# Production (PO, Windows-native — the canonical build, the ONLY one committed)
 python -m model.train --n-pumps 30 --seed 0
 
-# Sandbox / CI / any resource-constrained environment (pipeline validation only)
+# Sandbox / CI / any resource-constrained environment (pipeline validation only — never staged)
 python -m model.train --n-pumps 12 --seed 0
 ```
 

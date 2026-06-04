@@ -2,7 +2,7 @@
 
 Load this when work crosses component boundaries (e.g., simulator → scorer, scorer → batcher). Keep schemas authoritative here; component files reference, don't duplicate.
 
-> **Status:** Many shapes below are TBD pending resolution of HANDOFF.md §6 open questions. Filled in as decisions are made.
+> **Status:** Most shapes below are resolved and live. Remaining open items are marked inline (Grafana adapter API contract — HANDOFF.md §6 Q1; AWS-mode reference bundling location — §6 Q4).
 
 ## MQTT topic pattern
 ```
@@ -99,8 +99,8 @@ s3://<bucket>/year=YYYY/month=MM/day=DD/hour=HH/<batch>.parquet
 
 ## PSI parameters
 - Per-feature, rolling 1-hour window per pump.
-- Bin count: TBD (likely 10 equal-frequency).
-- Smoothing: TBD (Laplace + epsilon to avoid div/0).
+- Bin count: 10 equal-frequency bins (ADR 0007).
+- Smoothing: Laplace add-α, α = 1.0 (`shared.drift.LAPLACE_ALPHA`, ADR 0007).
 - Thresholds: <0.1 stable, 0.1–0.25 warning, >0.25 significant shift.
 
 ## SNS alert payload
