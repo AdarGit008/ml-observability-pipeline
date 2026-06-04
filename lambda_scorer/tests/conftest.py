@@ -1,22 +1,34 @@
 """Test fixtures for ``lambda_scorer.handler``.
 
-Provides ``fresh_handler``: a fixture that mocks DynamoDB via moto,
-creates the per-ADR-0010 table, and re-imports the handler so its
-module-level boto3 resource client binds to the moto-mocked client.
+Provides ``fresh_handler``: a fixture that mocks DynamoDB + SNS via
+moto, creates the per-ADR-0010 table and the alert topic, and
+re-imports the handler so its module-level boto3 clients bind to the
+moto-mocked clients.
 
 Why ``importlib.reload`` is mandatory: the handler binds
-``_DDB = boto3.resource("dynamodb", ...)`` at module import time.
-The FIRST test in a process gets a moto-mocked client only if
-``@mock_aws`` is active before that import. Subsequent tests that
-just ``import lambda_scorer.handler`` get the cached binding from
+``_DDB = boto3.resource("dynamodb", ...)`` (and ``_SNS``) at module
+import time. The FIRST test in a process gets a moto-mocked client
+only if ``@mock_aws`` is active before that import. Subsequent tests
+that just ``import lambda_scorer.handler`` get the cached binding from
 the first import, regardless of whether ``@mock_aws`` is active for
 the current test. Reloading inside each fixture invocation forces
 the binding to refresh against the current moto context.
+
+Why the module-level ``SNS_TOPIC_ARN`` setdefault: the PSI follow-on
+made ``SNS_TOPIC_ARN`` a REQUIRED env var (``KeyError`` at cold-start
+if unset — the production fail-fast posture). Tests that import or
+reload the handler OUTSIDE the moto fixture (structural-parity tests,
+the cold-start tests) would crash on that ``KeyError`` unless a value
+is present. The setdefault below runs at conftest import — before any
+test module in this package executes — so every handler import sees a
+value. ``test_cold_start_missing_sns_topic_arn_raises_keyerror``
+deletes it deliberately to pin the production behaviour.
 """
 
 from __future__ import annotations
 
 import importlib
+import os
 from typing import Iterator
 
 import boto3
@@ -26,15 +38,24 @@ from moto import mock_aws
 
 TABLE_NAME: str = "test_pump_hot_state"
 
+# Placeholder ARN for handler imports outside the moto fixture. The
+# fixture overrides this with a real moto-created topic ARN. See the
+# module docstring for why this must exist before any test runs.
+os.environ.setdefault(
+    "SNS_TOPIC_ARN",
+    "arn:aws:sns:eu-central-1:000000000000:pump-alerts-placeholder",
+)
+
 
 @pytest.fixture
 def fresh_handler(monkeypatch) -> Iterator[tuple]:
     """Yield (handler_module, table_resource) inside a moto context.
 
     Sets AWS_* env vars before entering ``mock_aws()`` so boto3
-    doesn't try to use real credentials. Creates the table per
-    ADR 0010's key schema before reloading the handler so the
-    handler's module-level ``TABLE.query`` calls succeed.
+    doesn't try to use real credentials. Creates the DynamoDB table
+    per ADR 0010's key schema and the SNS alert topic before
+    reloading the handler so the handler's module-level clients bind
+    against live moto resources.
     """
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
@@ -60,8 +81,15 @@ def fresh_handler(monkeypatch) -> Iterator[tuple]:
         )
         table.wait_until_exists()
 
-        # Reload so the handler's module-level resource client picks
-        # up the moto-mocked client + the test-set env vars.
+        # Alert topic per the PSI follow-on. The handler's cold-start
+        # reads SNS_TOPIC_ARN (required); pointing it at a real
+        # moto-created topic keeps un-stubbed publish paths honest.
+        sns = boto3.client("sns", region_name="eu-central-1")
+        topic_arn = sns.create_topic(Name="test-pump-alerts")["TopicArn"]
+        monkeypatch.setenv("SNS_TOPIC_ARN", topic_arn)
+
+        # Reload so the handler's module-level clients pick up the
+        # moto-mocked clients + the test-set env vars.
         import lambda_scorer.handler as handler_mod
         importlib.reload(handler_mod)
 
