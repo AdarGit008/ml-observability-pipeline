@@ -51,7 +51,31 @@ variable "adapter_function_name" {
 }
 
 variable "fleet_size" {
-  description = "Pump count the adapter snapshots (P-01..P-NN per ADR 0014 §Decision 3). Must match the simulator fleet size — drift here means silently short snapshots."
+  description = "Pump count the adapter snapshots and the batcher tracks (P-01..P-NN). Must match the simulator fleet size — drift here means silently short snapshots and stale watermarks."
   type        = number
   default     = 15
+}
+
+variable "batcher_function_name" {
+  description = "Name of the cold-path batcher Lambda (ADR 0015). aws_teardown.sh derives the role, log-group, and EventBridge-rule names from it."
+  type        = string
+  default     = "pump-s3-batcher"
+}
+
+variable "batcher_schedule_expression" {
+  description = "Batcher cadence (ADR 0015 §Decision 3 — 60 s, HANDOFF §6 Q6). One Parquet file per tick."
+  type        = string
+  default     = "rate(1 minute)"
+}
+
+variable "batcher_safety_lag_seconds" {
+  description = "Batch-cutoff lag behind the wall clock (ADR 0015 §Decision 1) — covers the scorer write pipeline's worst case."
+  type        = number
+  default     = 5
+}
+
+variable "glue_database_name" {
+  description = "Glue Catalog database for the Parquet archive (ADR 0015 §Decision 4). Lowercase + underscores per Glue naming."
+  type        = string
+  default     = "pump_archive"
 }

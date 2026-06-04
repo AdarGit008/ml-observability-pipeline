@@ -35,3 +35,8 @@ variable "zip_output_path" {
   description = "Where archive_file writes the deploy zip."
   type        = string
 }
+
+variable "code_bucket" {
+  description = "Bucket the deploy zip is uploaded to (deploy/ prefix) — the 62 MB zip exceeds the 50 MB direct-upload limit (2026-06-04 measurement; ADR 0006 §Q4 fallback)."
+  type        = string
+}

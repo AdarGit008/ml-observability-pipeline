@@ -1,5 +1,4 @@
-# Outputs promised by context/infra.md §Interfaces. The S3 bucket
-# name lands with the cold-path session.
+# Outputs promised by context/infra.md §Interfaces.
 
 output "sns_topic_arn" {
   description = "Alert topic ARN — also injected into the Lambda env as SNS_TOPIC_ARN."
@@ -34,4 +33,26 @@ output "adapter_function_url" {
 
 output "adapter_function_name" {
   value = module.dashboards_adapter.function_name
+}
+
+output "s3_bucket_name" {
+  description = "Cold-path archive bucket (ADR 0015) — also the batcher's S3_BUCKET env."
+  value       = module.s3_archive.bucket_name
+}
+
+output "glue_database_name" {
+  value = module.glue_catalog.database_name
+}
+
+output "glue_table_name" {
+  description = "Athena-queryable readings table (partition projection — no Crawler, ever)."
+  value       = module.glue_catalog.table_name
+}
+
+output "batcher_function_name" {
+  value = module.lambda_s3_batcher.function_name
+}
+
+output "batcher_schedule_rule_name" {
+  value = module.lambda_s3_batcher.schedule_rule_name
 }

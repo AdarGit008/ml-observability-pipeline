@@ -1,21 +1,25 @@
 # Root module — AWS hot path (IaC session #1, 2026-06-04) + Grafana
-# adapter (dashboards session, 2026-06-04).
+# adapter (dashboards session, 2026-06-04) + cold path (this session,
+# 2026-06-04: ADR 0015).
 #
 # Scope: DynamoDB hot-state table (ADR 0010/0013), SNS alert topic
-# (ADR 0012), scorer Lambda + packaging, IoT Rule trigger, scoped IAM,
-# fleet-snapshot adapter Lambda + Function URL (ADR 0014).
-# Out of scope (later sessions): s3_archive, glue_catalog,
-# lambda_s3_batcher, IoT Thing/cert provisioning (simulator-side).
+# (ADR 0012), scorer Lambda + packaging, IoT Rule trigger (+ republish
+# error_action), scoped IAM, fleet-snapshot adapter Lambda + Function
+# URL (ADR 0014), S3 archive bucket + Glue Catalog table + batcher
+# Lambda on an EventBridge schedule (ADR 0015).
+# Out of scope (later sessions): IoT Thing/cert provisioning
+# (simulator-side), Grafana dashboard JSON, CI.
 #
 # Run order (PO-side):
 #   1. .\scripts\build_lambda.ps1        # stages .build/lambda_dist/
 #   2. .\scripts\build_adapter.ps1       # stages .build/adapter_dist/
-#   3. cd infra && terraform init
-#   4. terraform validate
-#   5. terraform plan                    # review resource list — no apply in-session
+#   3. .\scripts\build_batcher.ps1       # stages .build/batcher_dist/
+#   4. cd infra && terraform init
+#   5. terraform validate
+#   6. terraform plan                    # review resource list — no apply in-session
 #
 # The archive_file data sources read the staged .build/ trees at plan
-# time, so BOTH build scripts MUST run before terraform plan
+# time, so ALL THREE build scripts MUST run before terraform plan
 # (validate works without them).
 
 module "dynamodb" {
@@ -44,6 +48,7 @@ module "lambda_scorer" {
   role_arn        = module.iam.role_arn
   table_name      = var.ddb_table_name
   topic_arn       = module.sns.topic_arn
+  code_bucket     = module.s3_archive.bucket_name # 62 MB zip > 50 MB direct-upload limit (2026-06-04)
   memory_mb       = var.lambda_memory_mb
   timeout_s       = var.lambda_timeout_s
   dist_dir        = abspath("${path.root}/../.build/lambda_dist")
@@ -55,6 +60,7 @@ module "iot_rule" {
   rule_name     = "pump_telemetry_to_scorer"
   lambda_arn    = module.lambda_scorer.function_arn
   function_name = module.lambda_scorer.function_name
+  aws_region    = var.aws_region
 }
 
 module "dashboards_adapter" {
@@ -66,4 +72,32 @@ module "dashboards_adapter" {
   fleet_size      = var.fleet_size
   dist_dir        = abspath("${path.root}/../.build/adapter_dist")
   zip_output_path = abspath("${path.root}/../.build/dashboards_adapter.zip")
+}
+
+# --- Cold path (ADR 0015) ---
+
+module "s3_archive" {
+  source      = "./modules/s3_archive"
+  name_prefix = var.project_tag
+}
+
+module "glue_catalog" {
+  source        = "./modules/glue_catalog"
+  database_name = var.glue_database_name
+  bucket_name   = module.s3_archive.bucket_name
+}
+
+module "lambda_s3_batcher" {
+  source              = "./modules/lambda_s3_batcher"
+  function_name       = var.batcher_function_name
+  table_name          = var.ddb_table_name
+  table_arn           = module.dynamodb.table_arn
+  bucket_name         = module.s3_archive.bucket_name
+  bucket_arn          = module.s3_archive.bucket_arn
+  aws_region          = var.aws_region
+  fleet_size          = var.fleet_size
+  safety_lag_seconds  = var.batcher_safety_lag_seconds
+  schedule_expression = var.batcher_schedule_expression
+  dist_dir            = abspath("${path.root}/../.build/batcher_dist")
+  zip_output_path     = abspath("${path.root}/../.build/lambda_s3_batcher.zip")
 }
