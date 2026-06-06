@@ -1,0 +1,36 @@
+# Grafana datasource provisioning — local mode.
+#
+# Both datasources are pre-wired so `docker compose up` needs zero manual
+# Grafana configuration. The Infinity plugin (AWS mode) is installed at
+# container start via GF_INSTALL_PLUGINS.
+#
+# UIDs are pinned so dashboard JSON references are stable across restarts.
+
+apiVersion: 1
+
+datasources:
+  - name: InfluxDB-local
+    type: influxdb
+    uid: influxdb-local
+    access: proxy
+    url: http://influxdb:8086
+    jsonData:
+      version: Flux
+      organization: ml-obs
+      defaultBucket: pump_telemetry
+      tlsSkipVerify: true
+    secureJsonData:
+      token: ml-obs-local-token
+    isDefault: true
+    editable: true
+
+  - name: Infinity-AWS
+    type: yesoreyeram-infinity-datasource
+    uid: infinity-aws
+    access: proxy
+    isDefault: false
+    editable: true
+    jsonData:
+      allowedHosts:
+        - "http://host.docker.internal:9000"
+    secureJsonData: {}
