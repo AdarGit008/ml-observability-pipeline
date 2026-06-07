@@ -1,8 +1,8 @@
 # Local-mode infrastructure for the ML Observability Pipeline.
 #
-# Brings up the broker the simulator publishes to and the TSDB the
-# local_runtime service writes scored rows into. Grafana lands in a
-# future "dashboards" session (PLAN.md §2.9).
+# Brings up the broker the simulator publishes to, the TSDB the
+# local_runtime service writes scored rows into, and Grafana with both
+# dashboards provisioned (PLAN.md §2.9; dashboards session #2).
 #
 # Usage:
 #   docker compose up -d                  # broker + TSDB
@@ -63,6 +63,49 @@ services:
       - influxdb_config:/etc/influxdb2
     restart: unless-stopped
 
+
+  grafana:
+    # Grafana OSS local Docker — the dashboards component (PLAN.md §2.9,
+    # dashboards session #2 2026-06-04). Managed Grafana is an
+    # anti-pattern (context/_global.md). Pinned 11.6.0 for
+    # reproducibility, same posture as influxdb:2.7 above.
+    image: grafana/grafana-oss:11.6.0
+    container_name: ml-obs-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      # Infinity datasource (ADR 0014) installed at container start —
+      # signed + free; no custom image to build/maintain (PO call
+      # 2026-06-04, dashboards #2). Needs internet on first boot;
+      # cached in grafana_data afterwards.
+      GF_INSTALL_PLUGINS: yesoreyeram-infinity-datasource
+      # Demo ergonomics: open the browser, see the dashboard. No login
+      # form, anonymous admin. Local-only Grafana on localhost:3000 —
+      # same threat posture as the InfluxDB token above.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      # AWS-mode adapter base URL (per-apply value). Provisioning
+      # expands it into the Infinity datasource. Set from Terraform
+      # before bringing the stack up for an AWS demo:
+      #   $env:ADAPTER_FUNCTION_URL = (terraform -chdir=infra output -raw adapter_function_url)
+      # Empty default keeps local-only `docker compose up` clean — the
+      # local dashboard never touches this datasource.
+      ADAPTER_FUNCTION_URL: ${ADAPTER_FUNCTION_URL:-}
+    volumes:
+      # Provisioning-as-code (PO call 2026-06-04, dashboards #2):
+      # datasources + dashboard provider load at start, zero manual
+      # import. Read-only — the repo JSONs are the source of truth.
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./dashboards:/var/lib/grafana/dashboards:ro
+      # Named volume persists the downloaded Infinity plugin across
+      # restarts so GF_INSTALL_PLUGINS doesn't re-fetch every boot.
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - influxdb
+    restart: unless-stopped
+
 volumes:
   influxdb_data:
   influxdb_config:
+  grafana_data:

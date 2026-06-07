@@ -1,0 +1,239 @@
+{
+  "__comment": "Local-mode dashboard — InfluxDB (Flux) datasource, uid influxdb-local. Panel field vocabulary is pinned to ADR 0005 §3 / ADR 0009: 'score' + the four surviving psi_<feature> fields. Band colors per context/_interfaces.md §PSI parameters (<0.10 stable / 0.10–0.25 warning / >0.25 significant). Pair file: aws.json (same concepts against the ADR 0014 adapter snapshot). Provisioned by grafana/provisioning/dashboards/dashboards.yml — do not import manually.",
+  "uid": "pump-fleet-local",
+  "title": "Pump Fleet — Local (InfluxDB)",
+  "tags": ["ml-obs", "local-mode"],
+  "timezone": "utc",
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "5s",
+  "time": { "from": "now-30m", "to": "now" },
+  "schemaVersion": 39,
+  "templating": {
+    "list": [
+      {
+        "name": "pump",
+        "label": "Pump",
+        "type": "query",
+        "datasource": { "type": "influxdb", "uid": "influxdb-local" },
+        "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"pump_telemetry\", tag: \"pump_id\")",
+        "refresh": 2,
+        "multi": true,
+        "includeAll": true,
+        "current": { "selected": true, "text": ["All"], "value": ["$__all"] },
+        "sort": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "table",
+      "title": "Fleet — latest P(failure 48h) per pump",
+      "datasource": { "type": "influxdb", "uid": "influxdb-local" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "from(bucket: \"pump_telemetry\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"pump_telemetry\" and r._field == \"score\")\n  |> last()\n  |> group()\n  |> keep(columns: [\"pump_id\", \"_time\", \"_value\"])\n  |> sort(columns: [\"pump_id\"])"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 0.7 }
+            ]
+          },
+          "decimals": 3,
+          "custom": { "cellOptions": { "type": "color-background" }, "align": "auto" }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "_value" },
+            "properties": [{ "id": "displayName", "value": "P(failure 48h)" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "pump_id" },
+            "properties": [{ "id": "custom.cellOptions", "value": { "type": "auto" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "_time" },
+            "properties": [
+              { "id": "displayName", "value": "last scored" },
+              { "id": "custom.cellOptions", "value": { "type": "auto" } }
+            ]
+          }
+        ]
+      },
+      "options": { "sortBy": [{ "displayName": "pump_id", "desc": false }] }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "P(failure 48h) over time — $pump",
+      "datasource": { "type": "influxdb", "uid": "influxdb-local" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "from(bucket: \"pump_telemetry\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"pump_telemetry\" and r._field == \"score\")\n  |> filter(fn: (r) => r.pump_id =~ /^${pump:regex}$/)\n  |> keep(columns: [\"_time\", \"_value\", \"pump_id\"])"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1,
+          "decimals": 2,
+          "custom": { "spanNulls": true, "lineWidth": 1, "fillOpacity": 5, "showPoints": "never" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 0.7 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "PSI — vibration_amp",
+      "datasource": { "type": "influxdb", "uid": "influxdb-local" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "from(bucket: \"pump_telemetry\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"pump_telemetry\" and r._field == \"psi_vibration_amp\")\n  |> filter(fn: (r) => r.pump_id =~ /^${pump:regex}$/)\n  |> keep(columns: [\"_time\", \"_value\", \"pump_id\"])"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "decimals": 3,
+          "custom": { "spanNulls": true, "lineWidth": 1, "fillOpacity": 5, "showPoints": "auto" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "#EAB839", "value": 0.1 },
+              { "color": "red", "value": 0.25 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "PSI — bearing_temp",
+      "datasource": { "type": "influxdb", "uid": "influxdb-local" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "from(bucket: \"pump_telemetry\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"pump_telemetry\" and r._field == \"psi_bearing_temp\")\n  |> filter(fn: (r) => r.pump_id =~ /^${pump:regex}$/)\n  |> keep(columns: [\"_time\", \"_value\", \"pump_id\"])"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "decimals": 3,
+          "custom": { "spanNulls": true, "lineWidth": 1, "fillOpacity": 5, "showPoints": "auto" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "#EAB839", "value": 0.1 },
+              { "color": "red", "value": 0.25 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "PSI — motor_current",
+      "datasource": { "type": "influxdb", "uid": "influxdb-local" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 17 },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "from(bucket: \"pump_telemetry\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"pump_telemetry\" and r._field == \"psi_motor_current\")\n  |> filter(fn: (r) => r.pump_id =~ /^${pump:regex}$/)\n  |> keep(columns: [\"_time\", \"_value\", \"pump_id\"])"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "decimals": 3,
+          "custom": { "spanNulls": true, "lineWidth": 1, "fillOpacity": 5, "showPoints": "auto" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "#EAB839", "value": 0.1 },
+              { "color": "red", "value": 0.25 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "PSI — rpm",
+      "datasource": { "type": "influxdb", "uid": "influxdb-local" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 17 },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "from(bucket: \"pump_telemetry\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"pump_telemetry\" and r._field == \"psi_rpm\")\n  |> filter(fn: (r) => r.pump_id =~ /^${pump:regex}$/)\n  |> keep(columns: [\"_time\", \"_value\", \"pump_id\"])"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "decimals": 3,
+          "custom": { "spanNulls": true, "lineWidth": 1, "fillOpacity": 5, "showPoints": "auto" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "#EAB839", "value": 0.1 },
+              { "color": "red", "value": 0.25 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    }
+  ]
+}

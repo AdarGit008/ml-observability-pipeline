@@ -18,8 +18,9 @@ Terraform that stands up the AWS demo stack in `eu-central-1`. Apply → 30-min 
   - `lambda_s3_batcher`: 256 MB / 30 s, `reserved_concurrent_executions = 1` (watermark race guard), EventBridge `rate(1 minute)` + invoke permission. IAM: Query/BatchGetItem/PutItem on the table ARN + PutObject on `<bucket>/year=*` + scoped logs — the no-compute tripwire. Staged by `scripts/build_batcher.{ps1,sh}` + `scripts/batcher_requirements.txt` (pyarrow only; footprint check per ADR 0006 §Q4).
   - **Code upload via S3** (both Lambdas): first measured zips (2026-06-04) came out 62 MB (scorer — OVER the 50 MB direct-upload limit; ADR 0006 §Q4 anticipated fallback) and 47.6 MB (batcher — 2 MB headroom). `aws_s3_object` pushes both zips to the archive bucket under `deploy/`; functions reference `s3_bucket`/`s3_key`; `source_code_hash` unchanged. Root cause of the growth: real wheels (sklearn 1.9.0 pinned to the training env + numpy tests exemption) vs the ~124 MB paper estimate.
   - IoT Rule gained `error_action` → republish to `factory/errors` with a single-topic-scoped role (`pump_telemetry_to_scorer_error_republish`) — closes the 2026-06-04 cascade finding after two deferrals.
-- ✅ `scripts/aws_teardown.sh` covers BOTH paths: destroy wrapper + absence sweep (table, topic+subscription, all THREE Lambdas, three log groups, Function URL, IoT rule, four IAM roles, bucket, Glue database+table, EventBridge rule) + $1/$5 budget-alert posture check. `--verify-only` / `--destroy-only` modes.
-- [ ] Not yet: IoT Thing/cert provisioning; CI cost guardrails.
+- ✅ `scripts/aws_teardown.sh` covers BOTH paths + the IoT fleet (2026-06-07: Things `P-00..P-NN` via `FLEET_SIZE`, `pump-fleet-policy` absence, ACTIVE-cert count FAIL (WARN→FAIL per 2026-06-07 cascade pt 4), leftover local `*.private.key` WARN): destroy wrapper + absence sweep (table, topic+subscription, all THREE Lambdas, three log groups, Function URL, IoT rule, four IAM roles, bucket, Glue database+table, EventBridge rule) + $1/$5 budget-alert posture check. `--verify-only` / `--destroy-only` modes.
+- ✅ IoT fleet identity shipped 2026-06-07 (iot-fleet session, **ADR 0016**): `modules/iot_fleet` — 15 Things (bare `P-NN`, locked to client_id/pump_id per ADR 0003), AWS-generated certs (`aws_iot_certificate`, no CSR — private keys in the LOCAL-ONLY gitignored tfstate, accepted custody trade), ONE shared policy via `${iot:Connection.Thing.ThingName}` (Connect-as-self + Publish-to-own-topic only, `IsAttached` condition), `data aws_iot_endpoint` → `iot_endpoint` output. `local_sensitive_file` writes cert/key under `simulator/.secrets/` (apply IS the cert pull; destroy deletes the files). Root CA fetched via `data http` from amazontrust.com (postcondition 200) — plan now needs reach beyond AWS. New providers: `hashicorp/local ~> 2.5`, `hashicorp/http ~> 3.4` (re-run `terraform init`). Runbook: `docs/runbooks/aws-demo-day.md` (incl. one-time Console-P-00 cleanup pre-step).
+- [ ] Not yet: CI cost guardrails.
 
 ## Run order (PO-side; terraform not in sandbox)
 1. `.\scripts\build_lambda.ps1` — stages `.build/lambda_dist/` + Docker smoke-check.
@@ -32,17 +33,18 @@ Terraform that stands up the AWS demo stack in `eu-central-1`. Apply → 30-min 
 The `archive_file` data sources read the `.build/` trees at plan time — ALL THREE builds before plan (validate works without them).
 
 ## Interfaces (in / out)
-- **In:** `infra/terraform.tfvars` (gitignored; copy from `terraform.tfvars.example`) — project tag, alert email. Region is a locked-validated default. `fleet_size` (default 15) must match the simulator fleet. Cold-path knobs: `batcher_schedule_expression` (default `rate(1 minute)`), `batcher_safety_lag_seconds` (default 5), `glue_database_name`.
-- **Out:** `sns_topic_arn`, `ddb_table_name`/`arn`, `lambda_function_name`/`arn`, `iot_rule_arn`, `adapter_function_url` (→ Grafana Infinity datasource), `adapter_function_name`, `s3_bucket_name`, `glue_database_name`, `glue_table_name`, `batcher_function_name`, `batcher_schedule_rule_name`.
+- **In:** `infra/terraform.tfvars` (gitignored; copy from `terraform.tfvars.example`) — project tag, alert email. Region is a locked-validated default. `fleet_size` (default 15) must match the simulator fleet. Cold-path knobs: `batcher_schedule_expression` (default `rate(1 minute)`), `batcher_safety_lag_seconds` (default 5), `glue_database_name`. IoT knob: `iot_policy_name` (default `pump-fleet-policy`).
+- **Out:** `sns_topic_arn`, `ddb_table_name`/`arn`, `lambda_function_name`/`arn`, `iot_rule_arn`, `adapter_function_url` (→ Grafana Infinity datasource), `adapter_function_name`, `s3_bucket_name`, `glue_database_name`, `glue_table_name`, `batcher_function_name`, `batcher_schedule_rule_name`, `iot_endpoint` (→ simulator `broker.url`), `iot_thing_names`, `iot_policy_name`.
 
 ## Cost guardrails (CI-enforced — CI itself still TODO)
 - CI plan-check must fail if any of these resource types appear: `aws_instance`, `aws_db_instance`, `aws_kinesis_firehose_delivery_stream`, `aws_glue_crawler`, `aws_grafana_workspace`.
 - Region pin: `eu-central-1` — enforced today by variable validation; CI re-check later.
+- IoT Core is 12-month free tier, NOT Always-Free (ADR 0016 §Cost, verified 2026-06-07): $0/demo inside the account's first 12 months; ~$0.018/demo after (13.5K msgs + rules engine + connection minutes).
 - ADR 0013 is the one documented non-$0 exception (~$0.10–0.20/demo DynamoDB on-demand). Adapter reads add ~$0.0003/demo (ADR 0014); batcher reads + S3 PUTs add ~$0.0005/demo combined (ADR 0015 — S3 storage/Glue/EventBridge verified Always-Free 2026-06-04).
 - `aws_teardown.sh` after every demo, no exceptions; it also re-verifies the $1/$5 budget alerts exist.
 
 ## Open questions
-- mTLS provisioning flow for IoT Core Things — generate certs locally, upload via Terraform, or via separate `scripts/provision_certs.sh`? (Simulator-side; not in the hot-path modules.)
+- ~~mTLS provisioning flow for IoT Core Things~~ — **RESOLVED 2026-06-07 (ADR 0016):** Terraform-generated certs in `modules/iot_fleet`, keys in local-only state, material written to `simulator/.secrets/` at apply.
 
 ## Related ADRs
 - ADR 0005 §Addendum Q1 — build-script staging answer to multi-root packaging.
@@ -51,4 +53,5 @@ The `archive_file` data sources read the `.build/` trees at plan time — ALL TH
 - ADR 0012 — SNS topic contract + env-var fail-fast posture.
 - ADR 0013 — on-demand billing decision (IaC session #1).
 - ADR 0014 — adapter contract + Function URL auth mode (dashboards session #1).
+- ADR 0016 — IoT fleet provisioning: cert custody, shared thing-variable policy, `{pump_id}` templating (iot-fleet session).
 - ADR 0015 — cold-path batcher: watermark read pattern, pyarrow, cadence, partition projection, force_destroy (cold-path session).

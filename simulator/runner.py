@@ -62,9 +62,11 @@ import logging
 from typing import Callable, Optional, Sequence
 
 from simulator.config import (
+    PUMP_ID_PLACEHOLDER,
     ScenarioKind,
     SimulatorConfig,
     profiles_for,
+    tls_for_pump,
 )
 from simulator.publisher import (
     Publisher,
@@ -179,6 +181,33 @@ class Fleet:
         """
         profiles = profiles_for(config)
 
+        # A multi-pump aws-iot fleet whose cert/key paths carry no
+        # {pump_id} placeholder shares ONE certificate across the whole
+        # fleet. The thing-variable policy (ADR 0016) then denies
+        # CONNECT for every pump but the one Thing the cert is attached
+        # to -- which surfaces as transient PublisherError and a silent
+        # 30s-cap retry loop for the other N-1 pumps: exactly the
+        # buried-error UX ADR 0003 §Addendum 2026-05-28 exists to
+        # avoid. Not an error (a non-AWS mTLS broker may legitimately
+        # share certs), but loud enough to find in the first screen of
+        # logs.
+        if (
+            config.broker.tls is not None
+            and config.fleet.pump_count > 1
+            and PUMP_ID_PLACEHOLDER
+            not in (config.broker.tls.cert_path + config.broker.tls.key_path)
+        ):
+            log.warning(
+                "broker.tls paths contain no %r placeholder but "
+                "fleet.pump_count is %d -- all pumps will present the "
+                "SAME certificate. Against AWS IoT Core's per-Thing "
+                "policy (ADR 0016) every pump except the cert's "
+                "attached Thing will be denied CONNECT and retry "
+                "forever. See simulator/config.example.yaml.",
+                PUMP_ID_PLACEHOLDER,
+                config.fleet.pump_count,
+            )
+
         def _make_pump(pump_id: str) -> Pump:
             idx = int(pump_id.split("-")[1])
             return Pump(
@@ -190,11 +219,19 @@ class Fleet:
             )
 
         def _make_publisher(pump_id: str) -> Publisher:
+            # Per-pump mTLS identity (ADR 0016): expand the {pump_id}
+            # placeholder in the tls paths for THIS pump. None for
+            # target: local. Because this closure is also stashed as
+            # the publisher_factory, FleetExpansion's add_pump mints
+            # per-pump identities too.
+            tls = config.broker.tls
+            if tls is not None:
+                tls = tls_for_pump(tls, pump_id)
             return make_publisher(
                 target=config.broker.target,
                 url=config.broker.url,
                 client_id=pump_id,
-                tls=config.broker.tls,
+                tls=tls,
             )
 
         members: list[tuple[Pump, Publisher]] = []

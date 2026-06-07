@@ -1,0 +1,426 @@
+{
+  "__comment": "AWS-mode dashboard — Infinity datasource (uid infinity-aws) against the adapter Function URL (ADR 0014 snapshot contract). Query URLs are relative (''): the base URL comes from the datasource, which provisioning fills from the ADAPTER_FUNCTION_URL env var. The adapter returns a point-in-time snapshot (no history), so the local-mode timeseries concepts render here as current-state views (table / bar gauge / stat) over the SAME field vocabulary: latest_score + the four psi_<feature> keys (ADR 0005 §3 / ADR 0009) + the ADR 0012 literal passthroughs alert_flag / last_alert_sent_at. last_alert_sent_at columns pin type 'string' explicitly — mixed null + ISO values, don't trust column inference (2026-06-04 review Q6). Pair file: local.json. Provisioned by grafana/provisioning/dashboards/dashboards.yml.",
+  "uid": "pump-fleet-aws",
+  "title": "Pump Fleet — AWS (DynamoDB adapter)",
+  "tags": ["ml-obs", "aws-mode"],
+  "timezone": "utc",
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "5s",
+  "time": { "from": "now-30m", "to": "now" },
+  "schemaVersion": 39,
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Pumps reporting",
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "infinity-aws" },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "url": "",
+          "url_options": { "method": "GET", "data": "" },
+          "root_selector": "",
+          "columns": [
+            { "selector": "pumps_reporting", "text": "pumps_reporting", "type": "number" },
+            { "selector": "fleet_size", "text": "fleet_size", "type": "number" }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "green", "value": null }]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "pumps_reporting" },
+            "properties": [{ "id": "displayName", "value": "reporting" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "fleet_size" },
+            "properties": [{ "id": "displayName", "value": "fleet size" }]
+          }
+        ]
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value_and_name",
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 2,
+      "type": "table",
+      "title": "Fleet snapshot — score, PSI, alert state",
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "infinity-aws" },
+      "gridPos": { "h": 10, "w": 18, "x": 6, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "url": "",
+          "url_options": { "method": "GET", "data": "" },
+          "root_selector": "$.pumps",
+          "columns": [
+            { "selector": "pump_id", "text": "pump_id", "type": "string" },
+            { "selector": "latest_ts", "text": "latest_ts", "type": "string" },
+            { "selector": "latest_score", "text": "latest_score", "type": "number" },
+            { "selector": "psi_vibration_amp", "text": "psi_vibration_amp", "type": "number" },
+            { "selector": "psi_bearing_temp", "text": "psi_bearing_temp", "type": "number" },
+            { "selector": "psi_motor_current", "text": "psi_motor_current", "type": "number" },
+            { "selector": "psi_rpm", "text": "psi_rpm", "type": "number" },
+            { "selector": "alert_flag", "text": "alert_flag", "type": "boolean" },
+            { "selector": "last_alert_sent_at", "text": "last_alert_sent_at", "type": "string" }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 3,
+          "custom": { "align": "auto", "cellOptions": { "type": "auto" } },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "green", "value": null }]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "latest_score" },
+            "properties": [
+              { "id": "custom.cellOptions", "value": { "type": "color-background" } },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "green", "value": null },
+                    { "color": "red", "value": 0.7 }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": { "id": "byRegexp", "options": "psi_.*" },
+            "properties": [
+              { "id": "custom.cellOptions", "value": { "type": "color-background" } },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "green", "value": null },
+                    { "color": "#EAB839", "value": 0.1 },
+                    { "color": "red", "value": 0.25 }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": { "sortBy": [{ "displayName": "pump_id", "desc": false }] }
+    },
+    {
+      "id": 3,
+      "type": "bargauge",
+      "title": "Latest P(failure 48h) per pump",
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "infinity-aws" },
+      "gridPos": { "h": 9, "w": 6, "x": 0, "y": 5 },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "url": "",
+          "url_options": { "method": "GET", "data": "" },
+          "root_selector": "$.pumps",
+          "columns": [
+            { "selector": "pump_id", "text": "pump_id", "type": "string" },
+            { "selector": "latest_score", "text": "latest_score", "type": "number" }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1,
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 0.7 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "/^latest_score$/", "values": true },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 4,
+      "type": "bargauge",
+      "title": "PSI — vibration_amp",
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "infinity-aws" },
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 14 },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "url": "",
+          "url_options": { "method": "GET", "data": "" },
+          "root_selector": "$.pumps",
+          "columns": [
+            { "selector": "pump_id", "text": "pump_id", "type": "string" },
+            { "selector": "psi_vibration_amp", "text": "psi_vibration_amp", "type": "number" }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 0.5,
+          "decimals": 3,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "#EAB839", "value": 0.1 },
+              { "color": "red", "value": 0.25 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "/^psi_vibration_amp$/", "values": true },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 5,
+      "type": "bargauge",
+      "title": "PSI — bearing_temp",
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "infinity-aws" },
+      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 14 },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "url": "",
+          "url_options": { "method": "GET", "data": "" },
+          "root_selector": "$.pumps",
+          "columns": [
+            { "selector": "pump_id", "text": "pump_id", "type": "string" },
+            { "selector": "psi_bearing_temp", "text": "psi_bearing_temp", "type": "number" }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 0.5,
+          "decimals": 3,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "#EAB839", "value": 0.1 },
+              { "color": "red", "value": 0.25 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "/^psi_bearing_temp$/", "values": true },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 6,
+      "type": "bargauge",
+      "title": "PSI — motor_current",
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "infinity-aws" },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 14 },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "url": "",
+          "url_options": { "method": "GET", "data": "" },
+          "root_selector": "$.pumps",
+          "columns": [
+            { "selector": "pump_id", "text": "pump_id", "type": "string" },
+            { "selector": "psi_motor_current", "text": "psi_motor_current", "type": "number" }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 0.5,
+          "decimals": 3,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "#EAB839", "value": 0.1 },
+              { "color": "red", "value": 0.25 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "/^psi_motor_current$/", "values": true },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 7,
+      "type": "bargauge",
+      "title": "PSI — rpm",
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "infinity-aws" },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 14 },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "url": "",
+          "url_options": { "method": "GET", "data": "" },
+          "root_selector": "$.pumps",
+          "columns": [
+            { "selector": "pump_id", "text": "pump_id", "type": "string" },
+            { "selector": "psi_rpm", "text": "psi_rpm", "type": "number" }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 0.5,
+          "decimals": 3,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "#EAB839", "value": 0.1 },
+              { "color": "red", "value": 0.25 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "/^psi_rpm$/", "values": true },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 8,
+      "type": "table",
+      "title": "Alert state (literal STATE-row passthrough — ADR 0012)",
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "infinity-aws" },
+      "gridPos": { "h": 9, "w": 12, "x": 6, "y": 22 },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "url": "",
+          "url_options": { "method": "GET", "data": "" },
+          "root_selector": "$.pumps",
+          "columns": [
+            { "selector": "pump_id", "text": "pump_id", "type": "string" },
+            { "selector": "alert_flag", "text": "alert_flag", "type": "boolean" },
+            { "selector": "last_alert_sent_at", "text": "last_alert_sent_at", "type": "string" }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "auto", "cellOptions": { "type": "auto" } },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "green", "value": null }]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "alert_flag" },
+            "properties": [
+              { "id": "custom.cellOptions", "value": { "type": "color-background" } },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "false": { "color": "green", "index": 0, "text": "OK" },
+                      "true": { "color": "red", "index": 1, "text": "ALERT" }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "last_alert_sent_at" },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "special",
+                    "options": {
+                      "match": "null",
+                      "result": { "index": 0, "text": "never" }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "options": { "sortBy": [{ "displayName": "pump_id", "desc": false }] }
+    }
+  ]
+}

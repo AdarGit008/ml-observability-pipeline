@@ -1,0 +1,20 @@
+# Grafana dashboard provisioning — file provider over the repo's
+# dashboards/ directory (mounted read-only at /var/lib/grafana/dashboards
+# in docker-compose.yml). Both dashboards (local + AWS pair) load on
+# `docker compose up` with zero manual import steps.
+#
+# allowUiUpdates: true lets a demo-time tweak happen in the UI, but the
+# mount is read-only so nothing persists back to the repo — the JSON
+# files stay the source of truth.
+
+apiVersion: 1
+
+providers:
+  - name: ml-obs-dashboards
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

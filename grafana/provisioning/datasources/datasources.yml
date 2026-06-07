@@ -1,0 +1,45 @@
+# Grafana datasource provisioning — loaded at container start from
+# /etc/grafana/provisioning/datasources (mounted in docker-compose.yml).
+#
+# UIDs are PINNED here (session-log decision, 2026-06-04 dashboards #2):
+# the dashboard JSON pair (dashboards/local.json, dashboards/aws.json)
+# references `influxdb-local` and `infinity-aws` deterministically.
+# Renaming a uid here without updating both dashboards breaks every
+# panel — the vocabulary test pins the pairing.
+#
+# InfluxDB token: same plaintext-local-token posture as docker-compose
+# (ADR 0005 §Consequences/Negative) — local-only InfluxDB on
+# localhost:8086, threat model unchanged.
+#
+# ADAPTER_FUNCTION_URL: Grafana provisioning expands $ENV_VAR at load
+# time. Set it from the Terraform output before `docker compose up`
+# for AWS-mode demos:
+#   $env:ADAPTER_FUNCTION_URL = (terraform -chdir=infra output -raw adapter_function_url)
+# Unset, the Infinity datasource has an empty base URL and the AWS
+# dashboard shows query errors — the local dashboard is unaffected.
+
+apiVersion: 1
+
+datasources:
+  - name: InfluxDB (local)
+    uid: influxdb-local
+    type: influxdb
+    access: proxy
+    url: http://influxdb:8086
+    isDefault: true
+    editable: false
+    jsonData:
+      version: Flux
+      organization: ml-obs
+      defaultBucket: pump_telemetry
+    secureJsonData:
+      token: ml-obs-local-token
+
+  - name: Fleet adapter (AWS)
+    uid: infinity-aws
+    type: yesoreyeram-infinity-datasource
+    access: proxy
+    url: $ADAPTER_FUNCTION_URL
+    editable: false
+    jsonData:
+      auth_method: none

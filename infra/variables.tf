@@ -79,3 +79,9 @@ variable "glue_database_name" {
   type        = string
   default     = "pump_archive"
 }
+
+variable "iot_policy_name" {
+  description = "Name of the single shared IoT fleet policy (thing-policy variables — ADR 0016 §Decision 2). aws_teardown.sh checks absence by this name."
+  type        = string
+  default     = "pump-fleet-policy"
+}
