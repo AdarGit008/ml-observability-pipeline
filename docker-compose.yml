@@ -1,16 +1,13 @@
 # Local-mode infrastructure for the ML Observability Pipeline.
 #
-# Brings up the broker the simulator publishes to, the TSDB the
-# local_runtime service writes scored rows into, and Grafana for
-# dashboards. Both local (InfluxDB) and AWS (Infinity/adapter)
-# dashboards are provisioned automatically.
+# Brings up the broker the simulator publishes to and the TSDB the
+# local_runtime service writes scored rows into. Grafana lands in a
+# future "dashboards" session (PLAN.md §2.9).
 #
 # Usage:
-#   docker compose up -d                  # broker + TSDB + Grafana
+#   docker compose up -d                  # broker + TSDB
 #   python -m simulator &                 # publishes telemetry
 #   python -m local_runtime               # subscribes + scores + writes
-#
-# Grafana: http://localhost:3000 (admin / ml-obs-admin-password)
 #
 # Onboarding contract (DoD #2 of the 2026-05-29 local_runtime session):
 # a fresh clone with `docker compose up -d`, `python -m simulator`, and
@@ -66,36 +63,6 @@ services:
       - influxdb_config:/etc/influxdb2
     restart: unless-stopped
 
-  grafana:
-    # Grafana OSS — local only. Managed Grafana is $9/user/month
-    # (anti-pattern for $0 constraint).
-    image: grafana/grafana:10.4
-    container_name: ml-obs-grafana
-    ports:
-      - "3000:3000"
-    environment:
-      # Admin credentials for local dev.
-      GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: ml-obs-admin-password
-      # Install Infinity plugin for AWS-mode dashboard (datasource
-      # for the Lambda Function URL adapter).
-      GF_INSTALL_PLUGINS: yesoreyeram-infinity-datasource
-      # Provisioning paths.
-      GF_PATHS_PROVISIONING: /etc/grafana/provisioning
-    volumes:
-      # Datasource provisioning — pre-wires InfluxDB + Infinity.
-      - ./infra/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
-      # Dashboard provisioning — loads both JSON dashboards.
-      - ./infra/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
-      # Dashboard JSON files.
-      - ./dashboards:/var/lib/grafana/dashboards:ro
-      # Persist Grafana state (dashboard edits, etc.).
-      - grafana_data:/var/lib/grafana
-    depends_on:
-      - influxdb
-    restart: unless-stopped
-
 volumes:
   influxdb_data:
   influxdb_config:
-  grafana_data:

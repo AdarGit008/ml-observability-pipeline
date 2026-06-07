@@ -9,22 +9,15 @@ Single local Grafana instance with two datasources. Renders fleet health, per-pu
   - `alert_flag` + `last_alert_sent_at` literal passthrough (ADR 0012 §Alternatives 2C); absent-until-first-publish maps to JSON `null` on the wire.
   - Adapter does NOT import `shared/` — outside the ADR 0005 parity set; `test_adapter_does_not_import_shared` is the tripwire (joins the set in the same PR if that ever changes).
   - Datasource: **Infinity plugin**, root selector `$.pumps` (PO call 2026-06-04; SigV4/IAM upgrade is config-only).
-- ✅ Dashboard JSON pair shipped 2026-06-06 (dashboards session #2): `dashboards/local.json` (InfluxDB) + `dashboards/aws.json` (Infinity/adapter) with Grafana provisioning for zero-manual-import startup.
-  - Both dashboards render the same panel concepts: fleet score timeseries, fleet PSI timeseries, alert state table, per-pump detail, pumps reporting stat, max fleet score gauge, max fleet PSI gauge, alerts active stat.
-  - Thresholds: score > 0.7 (red), PSI > 0.25 (red), PSI 0.1–0.25 (yellow) — per `_interfaces.md §PSI parameters`.
-  - Grafana service added to `docker-compose.yml` with Infinity plugin auto-install and provisioning mounts.
-  - `infra/grafana/provisioning/datasources/datasources.yml` — pre-wires InfluxDB-local (default) + Infinity-AWS.
-  - `infra/grafana/provisioning/dashboards/dashboards.yml` — loads both JSON files from `/var/lib/grafana/dashboards`.
+- [ ] Not yet: the Grafana dashboards themselves — local + AWS-mode dashboard JSON pair, Infinity datasource provisioning, panel band colors per `_interfaces.md §PSI parameters`.
 
 ## Interfaces (in / out)
 - **In (local mode):** InfluxDB at `localhost:8086`.
 - **In (AWS mode):** adapter Function URL (Terraform output `adapter_function_url`) serving the ADR 0014 snapshot contract — see `_interfaces.md §Grafana → DynamoDB adapter`.
-- **Out:** Fleet heatmap of P(failure_48h), per-pump filtered detail, drift PSI panel (4 surviving `psi_*` fields per ADR 0009), alert-state table, pumps reporting stat.
+- **Out:** Three panels: fleet heatmap of P(failure_48h), per-pump filtered detail, drift PSI panel (4 surviving `psi_*` fields per ADR 0009).
 
 ## Open questions
-- ~~Dashboard JSON pair~~ — resolved 2026-06-06.
-- ~~Provisioning method~~ — resolved: provisioning-as-code via Grafana provisioning dirs.
-- ~~Infinity plugin install~~ — resolved: `GF_INSTALL_PLUGINS` env in docker-compose.
+- Dashboard JSON pair: confirmed default = second JSON file for AWS mode (avoids datasource-switching panel errors); build both in the Grafana session.
 - `FLEET_SIZE` (Terraform var → adapter env) duplicates the simulator fleet size — drift means silently short snapshots (`pumps_reporting` exposes it). Single-source-of-truth fix if it ever bites.
 - Infinity null-handling: verify column inference / type coercion on the `last_alert_sent_at` column (mixed `null` + ISO strings) when building the panels — 2026-06-04 review Q6 (groq) flagged it as verify-don't-assume.
 
