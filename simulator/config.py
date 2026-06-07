@@ -207,6 +207,34 @@ def profiles_for(config: SimulatorConfig) -> dict[PumpState, StateProfile]:
     return profiles
 
 
+PUMP_ID_PLACEHOLDER = "{pump_id}"
+"""Literal token expanded per pump in ``broker.tls`` paths (ADR 0016).
+
+Expansion is a plain ``str.replace`` (NOT ``str.format``) so stray
+braces elsewhere in a path can never raise. A path without the token
+is returned unchanged — the pre-ADR-0016 single-cert configs (e.g.
+the 2026-05-27 single-pump smoke) keep working verbatim.
+"""
+
+
+def tls_for_pump(tls: TlsConfig, pump_id: str) -> TlsConfig:
+    """Return ``tls`` with ``{pump_id}`` expanded in all three paths.
+
+    Pure function: builds a new frozen ``TlsConfig``; the input is
+    untouched. Called by ``Fleet.from_config`` (and its stashed
+    publisher factory, so ``FleetExpansion``'s mid-run ``add_pump``
+    gets per-pump identity too). The loader stays out of it — schema
+    validation remains shape-only (ADR 0003 §Decision 5); whether the
+    expanded path exists on disk is still ``AwsIotPublisher``'s call
+    at connect time.
+    """
+    return TlsConfig(
+        cert_path=tls.cert_path.replace(PUMP_ID_PLACEHOLDER, pump_id),
+        key_path=tls.key_path.replace(PUMP_ID_PLACEHOLDER, pump_id),
+        ca_path=tls.ca_path.replace(PUMP_ID_PLACEHOLDER, pump_id),
+    )
+
+
 # -- Internals ------------------------------------------------------------
 
 

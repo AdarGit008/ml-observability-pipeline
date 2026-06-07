@@ -1,88 +1,72 @@
-# Next session brief — dashboards #2: the Grafana JSON pair
+# Next session brief — first live AWS end-to-end apply (+ cold-start canary)
 
 ## Goal
-Close the dashboards component: two committed dashboard JSON files —
-`dashboards/local.json` (InfluxDB datasource) and `dashboards/aws.json`
-(Infinity datasource → adapter Function URL) — rendering the SAME
-panel concepts from the shared field vocabulary (ADR 0005 §3 /
-ADR 0009 / ADR 0014), plus Grafana provisioning so `docker compose up`
-loads them without manual import.
+Run the full AWS demo path for real, once: `terraform apply` → simulator
+aws-mode (15 pumps) → hot path scores → Grafana `aws.json` renders →
+cold path archives → `aws_teardown.sh` proves absence. Close every
+"verify at first apply" item the dry sessions accumulated, measure the
+scorer's cold start, and record what reality disagreed with.
 
-## PARITY-SET SESSION (Tier 2b loads mandatory)
-`dashboards` is in the ADR 0005 parity set (DEV_NORMS §5). Even
-though dashboard JSON calls no Python, the panel-level vocabulary IS
-the parity surface here. Load: `shared/{features,score,drift}.py`
-(read, don't re-derive), ADR 0005, and cite the enforcement tests
-(`local_runtime/tests/test_service.py::test_structural_parity_no_vendoring`
-+ siblings) by name. Do not start without these.
+## NOT a parity-set session
+Live verification + fixes. If any fix reaches into `shared/`, STOP and
+re-brief per DEV_NORMS §5 (Tier 2b loads).
 
-## Open questions to resolve
-1. **Provisioning method.** Grafana provisioning dirs
-   (`/etc/grafana/provisioning/{datasources,dashboards}` mounted in
-   docker-compose) vs manual import. Provisioning-as-code is the
-   expected leader (portfolio signal; reproducible demo).
-2. **Panel set.** Suggested: fleet score heatmap/table, per-pump score
-   timeseries, 4× PSI timeseries (`psi_<feature>`), alert-state table
-   (`alert_flag` + `last_alert_sent_at` passthrough — NO re-derived
-   thresholds, ADR 0012 §2C), `pumps_reporting / fleet_size` stat
-   (AWS mode). Decide the exact pair-equivalent set.
-3. **Infinity plugin install** — `GF_INSTALL_PLUGINS` env in
-   docker-compose vs baked image. The adapter URL is a
-   per-apply value: datasource provisioning needs a variable strategy
-   (env substitution? placeholder + README note?).
-4. **Refresh rate.** Adapter cost is noise (ADR 0014 ~$0.0003/demo),
-   so choose on demo-story grounds (5 s? 10 s?).
-5. **Datasource UIDs** — pin stable UIDs in provisioning so the JSON
-   pair references them deterministically.
+## Hard preconditions (before any AWS call)
+1. **Dashboards #2 commit landed FIRST** (explicit-path staging — its
+   draft is in `docs/sessions/2026-06-04-dashboards-grafana-json-pair.md`),
+   then the iot-fleet commit (draft in
+   `docs/sessions/2026-06-07-simulator-iot-fleet-provisioning.md`).
+   Both cascades run + dispositions folded pre-commit (DEV_NORMS §7).
+2. iot-fleet PO-side checks green: `terraform init` (new local/http
+   providers), all THREE build scripts, `terraform validate` + `plan`.
+3. One-time: Console-provisioned P-00 deleted (runbook §0).
 
 ## In-scope (in order)
-1. Plain-language walkthrough + AskUserQuestion for the PO calls above.
-2. ADR if (and only if) the provisioning/variable-URL decision proves
-   ADR-worthy; otherwise session-log decisions.
-3. The two JSON files + provisioning YAML + docker-compose wiring.
-4. Local-mode verification (Grafana in Docker against InfluxDB) —
-   PO-side eyes-on; structural checks sandbox-side (both files parse,
-   panel field names ⊆ ADR 0005 §3 vocabulary — consider a small test).
-5. Update `context/dashboards.md` (+ `_interfaces.md` only if the wire
-   contract gains anything — it shouldn't; ADR 0014 is locked).
+1. Walk `docs/runbooks/aws-demo-day.md` end-to-end, PO driving, Claude
+   navigating + debugging. Sandbox makes NO live AWS calls — PO pastes
+   outputs/errors.
+2. Close the verify-don't-assume items where they live:
+   `context/dashboards.md` §Open questions (Infinity relative-URL vs
+   base; `null last_alert_sent_at` rendering) + `pumps_reporting` → 15.
+3. Cold-start canary: first-invocation vs warm duration from the
+   scorer's log group; record in `context/lambda_scorer.md` open items.
+4. Watch the cost surfaces live: DynamoDB consumed units vs ADR 0013's
+   math, one Parquet/min in S3 (ADR 0015), IoT free-tier meter (ADR
+   0016). Record actuals vs predictions in the session log.
+5. `aws_teardown.sh` full run — sweep must exit 0 (first exercise of
+   the iot-fleet sweep against real residue).
+6. Session log + any fix diffs → cascade → dispositions → commit
+   (normal §7 sequence; no deferral expected this time).
 
 ## Loads
 - Tier 1: `context/_global.md`, DEV_NORMS §7 + §8.
-- Tier 2: `context/dashboards.md`.
-- **Tier 2b (parity):** `shared/features.py`, `shared/score.py`,
-  `shared/drift.py` + ADR 0005 + the structural-parity test names.
-- Tier 3: `context/_interfaces.md` (§Grafana adapter, §PSI parameters).
-- ADRs: 0014 (wire contract), 0009 (PSI surface), 0012 (alert
-  passthrough literalism), 0005 §3 (field names).
-- Memory: fuse-write-truncation (NEW Write files safe; existing-file
-  changes bash-side; verify both views), git-on-windows, infra-session1.
+- Tier 2: `context/infra.md`.
+- Tier 3: `context/_interfaces.md` (only if a wire shape misbehaves),
+  `context/dashboards.md` (§Open questions), `context/simulator.md`
+  (§AWS-mode), `docs/runbooks/aws-demo-day.md` (the script).
+- ADRs: 0013/0015/0016 (cost predictions to check against actuals),
+  0014 (adapter contract if panels misrender).
+- Memory: fuse-write-truncation, git-on-windows, infra-sessions.
 
 ## Constraints
-- $0: Grafana OSS local Docker only (Managed Grafana is an
-  anti-pattern); Infinity plugin is free/signed.
-- FUSE rules as always; docker-compose.yml is an EXISTING file —
-  bash-side rewrite, verify both views.
-- Bash 45 s cap. Git PO-side. BOM-free commit sequence (DEV_NORMS §7).
+- $0 posture: this demo SPENDS the ADR 0013 dimes — bound the run
+  (~30 min target), teardown immediately, no second apply without
+  reason. Budget alerts must stay green.
+- Terraform/AWS CLI/git all PO-side. Bash 45 s cap. FUSE rules
+  (existing files bash-rewrite; NEW via Write; never Edit on D:\).
+  BOM-free commit sequence.
 
 ## Definition of done
-- Both JSON files + provisioning committed; `docker compose up` renders
-  the local dashboard with zero manual steps (PO-verified).
-- Structural vocabulary check green; suite stays ≥ 404+1.
-- Session log + review packet → cascade → dispositions → commit.
-- Close with AskUserQuestion: next focus (candidates: simulator IoT
-  Thing/cert provisioning — unblocks AWS end-to-end; CI; README/portfolio
-  polish) + prepared brief.
+- End-to-end observed: pumps publish → scores in DynamoDB → aws.json
+  panels live → Parquet accumulating → teardown sweep exits 0.
+- Dashboards + cold-start open items closed in their context files;
+  actual-vs-predicted costs logged.
+- Session log + cascade + dispositions + commit landed.
+- Close with AskUserQuestion: next focus (candidates: CI cost
+  guardrails; README/portfolio polish; demo-day rehearsal script).
 
 ## Carried context
-- Suite baseline: **404 passed + 1 skipped** (cold-path session).
-- Verify the cold-path commit landed before starting
-  (`git log --oneline -3`, subject `infra: add cold path — …`) and
-  that its cascade dispositions were folded in pre-commit.
-- PO-side `terraform validate` + `plan` with ALL THREE build scripts
-  may still be pending from the cold-path session — if so, run that
-  first (no new infra this session, but a green plan is the baseline).
-- WATERMARK reserved SK now coexists with STATE (`_interfaces.md
-  §Reserved-SK coexistence`) — irrelevant to panels, but any SK-aware
-  change must check both.
-- Cold-start latency measurement remains post-first-apply
-  (boto3-runtime-version canary).
+- Suite baseline: **427 passed + 1 skipped** (iot-fleet session).
+- Fixes discovered live are in-scope if small; anything structural
+  becomes its own brief.
+- WATERMARK + STATE reserved-SK coexistence stands (`_interfaces.md`).

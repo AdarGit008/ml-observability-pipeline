@@ -55,6 +55,8 @@ broker:
   # owns format validation (aiomqtt parses scheme/host/port). For `local`
   # this is the Mosquitto endpoint; for `aws-iot` this is the IoT Core
   # ATS endpoint (e.g. "<account>-ats.iot.eu-central-1.amazonaws.com").
+  # The ATS endpoint is account-specific: after `terraform apply`, run
+  # `terraform output -raw iot_endpoint` (from infra/) and paste it here.
   url: "mqtt://localhost:1883"
 
   # mTLS material — REQUIRED when target is 'aws-iot', FORBIDDEN when
@@ -63,17 +65,18 @@ broker:
   # context build at connect time (see ADR 0003 §Decision 5 + Addendum
   # 2026-05-27 "AwsIotPublisher wired").
   #
-  # Example shape for an aws-iot manifest (uncomment after switching
-  # target above and provisioning Thing+cert+policy via the AWS IoT
-  # Console — see docs/sessions/2026-05-27-simulator-aws-iot-publisher.md
-  # for the Console walkthrough). Conventional layout per
-  # _interfaces.md §2.4 puts per-Thing material under
-  # `simulator/.secrets/<pump_id>/` (gitignored).
+  # Per-pump identity (ADR 0016): the literal token `{pump_id}` is
+  # expanded per pump by Fleet.from_config (plain string replace — not
+  # str.format), so one tls block serves the whole fleet. Paths without
+  # the token are used verbatim (the pre-ADR-0016 single-pump smoke
+  # shape still works). `terraform apply` provisions the Things, certs,
+  # and the shared policy AND writes the material into the gitignored
+  # `simulator/.secrets/` layout below — see docs/runbooks/aws-demo-day.md.
   #
   # tls:
-  #   cert_path: "simulator/.secrets/P-00/P-00.cert.pem"
-  #   key_path:  "simulator/.secrets/P-00/P-00.private.key"
-  #   ca_path:   "simulator/.secrets/P-00/AmazonRootCA1.pem"
+  #   cert_path: "simulator/.secrets/{pump_id}/{pump_id}.cert.pem"
+  #   key_path:  "simulator/.secrets/{pump_id}/{pump_id}.private.key"
+  #   ca_path:   "simulator/.secrets/AmazonRootCA1.pem"
 
 # Compress HEALTHY dwell so a fresh clone exercises the full
 # HEALTHY -> DEGRADING -> FAILING -> FAILED arc in a few minutes. Without

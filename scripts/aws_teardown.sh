@@ -27,6 +27,17 @@
 #   - Lambda                pump-s3-batcher (+ log group)
 #   - EventBridge rule      pump-s3-batcher-schedule
 #
+# IoT fleet (ADR 0016, iot-fleet session 2026-06-07):
+#   - IoT Things           P-00..P-(FLEET_SIZE-1)
+#   - IoT policy           pump-fleet-policy (shared, thing-variable scoped)
+#   - IoT certificates     FAIL if any ACTIVE cert remains (count-based —
+#                          certs have no stable names; terraform destroy
+#                          detaches, deactivates, and deletes them;
+#                          WARN->FAIL per 2026-06-07 cascade pt 4)
+#   - Local key material   WARN if simulator/.secrets still holds
+#                          *.private.key (terraform destroy removes the
+#                          local_sensitive_file resources)
+#
 # Also re-checks the $1/$5 budget-alert posture (ACCOUNT_SETUP.md) —
 # teardown is the natural moment to notice a deleted budget.
 #
@@ -37,7 +48,8 @@
 # Usage:  ./scripts/aws_teardown.sh [--destroy-only | --verify-only]
 # Env overrides (defaults match infra/variables.tf):
 #   DDB_TABLE_NAME, SCORER_FN, ADAPTER_FN, BATCHER_FN, SNS_TOPIC_NAME,
-#   IOT_RULE_NAME, GLUE_DB_NAME, GLUE_TABLE_NAME, PROJECT_TAG, BUCKET_NAME
+#   IOT_RULE_NAME, GLUE_DB_NAME, GLUE_TABLE_NAME, PROJECT_TAG, BUCKET_NAME,
+#   FLEET_SIZE, IOT_POLICY_NAME
 set -uo pipefail
 
 REGION="eu-central-1" # hard constraint #5 — do not parameterise
@@ -52,6 +64,8 @@ BATCHER_FN="${BATCHER_FN:-pump-s3-batcher}"
 GLUE_DB_NAME="${GLUE_DB_NAME:-pump_archive}"
 GLUE_TABLE_NAME="${GLUE_TABLE_NAME:-pump_readings}"
 PROJECT_TAG="${PROJECT_TAG:-ml-obs-pipeline}"
+FLEET_SIZE="${FLEET_SIZE:-15}"
+IOT_POLICY_NAME="${IOT_POLICY_NAME:-pump-fleet-policy}"
 # BUCKET_NAME is account-suffixed — resolved after the sts call below.
 
 MODE="${1:-full}" # full | --destroy-only | --verify-only
@@ -187,6 +201,49 @@ if aws events describe-rule --name "${BATCHER_FN}-schedule" \
   fail "EventBridge rule ${BATCHER_FN}-schedule still exists"
 else
   ok "EventBridge rule ${BATCHER_FN}-schedule gone"
+fi
+
+# ---------------------------------------------- iot-fleet sweep (ADR 0016)
+i=0
+while [ "$i" -lt "$FLEET_SIZE" ]; do
+  THING="$(printf 'P-%02d' "$i")"
+  if aws iot describe-thing --thing-name "$THING" \
+       --region "$REGION" >/dev/null 2>&1; then
+    fail "IoT Thing $THING still exists"
+  else
+    ok "IoT Thing $THING gone"
+  fi
+  i=$((i + 1))
+done
+
+if aws iot get-policy --policy-name "$IOT_POLICY_NAME" \
+     --region "$REGION" >/dev/null 2>&1; then
+  fail "IoT policy $IOT_POLICY_NAME still exists"
+else
+  ok "IoT policy $IOT_POLICY_NAME gone"
+fi
+
+# Certificates have no stable names, so this is count-based. FAIL, not
+# WARN (2026-06-07 cascade pt 4, PO-accepted): in a dedicated demo
+# account the expected post-destroy count is always 0, so any ACTIVE
+# cert — fleet leftover or stray Console experiment — should block and
+# be investigated, not skimmed past. The fleet's own certs are deleted
+# by terraform destroy via their attachments.
+ACTIVE_CERTS="$(aws iot list-certificates --region "$REGION" \
+    --query "certificates[?status=='ACTIVE'] | length(@)" --output text 2>/dev/null)"
+if [ -n "$ACTIVE_CERTS" ] && [ "$ACTIVE_CERTS" != "None" ] && [ "$ACTIVE_CERTS" -gt 0 ] 2>/dev/null; then
+  fail "$ACTIVE_CERTS ACTIVE IoT certificate(s) remain — expected 0 in a dedicated demo account (aws iot list-certificates)"
+else
+  ok "no ACTIVE IoT certificates remain"
+fi
+
+# Local key material: terraform destroy removes the local_sensitive_file
+# resources; leftovers mean destroy was interrupted or files were copied.
+LEFTOVER_KEYS="$(find "$REPO_ROOT/simulator/.secrets" -name '*.private.key' 2>/dev/null | wc -l | tr -d ' ')"
+if [ "${LEFTOVER_KEYS:-0}" -gt 0 ]; then
+  warn "$LEFTOVER_KEYS private key file(s) remain under simulator/.secrets — delete them (the cloud certs they matched are gone)"
+else
+  ok "no private key files remain under simulator/.secrets"
 fi
 
 # -------------------------------------------------- budget-alert posture

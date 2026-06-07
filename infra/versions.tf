@@ -19,6 +19,16 @@ terraform {
       source  = "hashicorp/archive"
       version = "~> 2.4"
     }
+    local = {
+      # iot_fleet: writes cert/key material to simulator/.secrets (ADR 0016).
+      source  = "hashicorp/local"
+      version = "~> 2.5"
+    }
+    http = {
+      # iot_fleet: fetches the public Amazon Root CA 1 at plan/apply (ADR 0016).
+      source  = "hashicorp/http"
+      version = "~> 3.4"
+    }
   }
 
   backend "local" {}

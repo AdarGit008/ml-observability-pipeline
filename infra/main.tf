@@ -7,8 +7,8 @@
 # error_action), scoped IAM, fleet-snapshot adapter Lambda + Function
 # URL (ADR 0014), S3 archive bucket + Glue Catalog table + batcher
 # Lambda on an EventBridge schedule (ADR 0015).
-# Out of scope (later sessions): IoT Thing/cert provisioning
-# (simulator-side), Grafana dashboard JSON, CI.
+# IoT Thing/cert provisioning: modules/iot_fleet (simulator identity,
+# ADR 0016, 2026-06-07). Out of scope (later sessions): CI.
 #
 # Run order (PO-side):
 #   1. .\scripts\build_lambda.ps1        # stages .build/lambda_dist/
@@ -100,4 +100,14 @@ module "lambda_s3_batcher" {
   schedule_expression = var.batcher_schedule_expression
   dist_dir            = abspath("${path.root}/../.build/batcher_dist")
   zip_output_path     = abspath("${path.root}/../.build/lambda_s3_batcher.zip")
+}
+
+# --- IoT fleet identity (ADR 0016) ---
+
+module "iot_fleet" {
+  source      = "./modules/iot_fleet"
+  fleet_size  = var.fleet_size
+  policy_name = var.iot_policy_name
+  cert_dir    = abspath("${path.root}/../simulator/.secrets")
+  aws_region  = var.aws_region
 }

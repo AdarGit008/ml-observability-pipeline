@@ -56,3 +56,17 @@ output "batcher_function_name" {
 output "batcher_schedule_rule_name" {
   value = module.lambda_s3_batcher.schedule_rule_name
 }
+
+output "iot_endpoint" {
+  description = "IoT Core ATS data endpoint (ADR 0016) — paste into simulator config broker.url for target: aws-iot."
+  value       = module.iot_fleet.iot_endpoint
+}
+
+output "iot_thing_names" {
+  value = module.iot_fleet.thing_names
+}
+
+output "iot_policy_name" {
+  description = "Shared fleet policy name — aws_teardown.sh sweeps by it."
+  value       = module.iot_fleet.policy_name
+}
