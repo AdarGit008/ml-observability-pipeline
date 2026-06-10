@@ -192,8 +192,8 @@ risk ADR 0017 closed. Rejected.
 **Follow-ups:**
 
 - **Infra session:** `infra/modules/fleet_psi` (EventBridge
-  `rate(5 minutes)` + Lambda + invoke permission; IAM = Query on the
-  table ARN + `sns:Publish` on the topic ARN + scoped logs — the
+  `rate(5 minutes)` + Lambda + invoke permission; IAM = Query + GetItem +
+  PutItem on the table ARN + `sns:Publish` on the topic ARN + scoped logs — the
   no-extra-access tripwire), `scripts/build_fleet_psi.{ps1,sh}`
   (drift-only staging: numpy + `shared/` + reference JSON; footprint
   check per ADR 0006 §Q4), `SNS_TOPIC_ARN`/`FLEET_SIZE` env wiring,
@@ -301,3 +301,49 @@ parity (arm through the same shared decision) and annotated in the handler.
 Sandbox full suite (excl. `lambda_s3_batcher`, pyarrow-gated): **425
 passed, 1 skipped** — unchanged (the fold touched a payload assertion +
 docs, added no tests). 9 fleet-PSI tests + 3 structural-parity guards green.
+
+
+## Addendum 2026-06-10 (infra) — fleet-PSI deployable; DeepSeek review folded
+
+Source: `review_responses/2026-06-10-fleet-psi-infra.md` (deepseek-reasoner).
+Covers the deferred infra half: `infra/modules/fleet_psi`,
+`scripts/build_fleet_psi.{ps1,sh}`, root wiring, teardown sweep. Build +
+`terraform validate`/`plan` only — NO apply (stack stays down, $0). Net:
+one design change (S3 upload), one doc fix (IAM wording); no algorithm or
+handler change.
+
+- **§2 S3 deploy path (Accepted — design change).** The module originally
+  used a direct `filename` upload (the adapter pattern). Switched to the
+  S3 `deploy/` path used by the scorer and batcher: it keeps the three
+  wheel-shipping Lambdas on one upload mechanism (north star #5),
+  eliminates the 50 MB direct-upload ceiling on any future numpy bump, and
+  would already be required if sklearn were ever added. `code_bucket` is
+  the archive bucket; `deploy/` is outside the Glue `year=*` projection
+  and is swept by the bucket's `force_destroy`.
+- **§1 IAM wording (Accepted — doc fix).** §Follow-ups above abbreviated
+  the table grant as "Query"; the handler's edge-trigger read + STATE
+  write also need `GetItem` + `PutItem`. The grant is exactly those three,
+  scoped to the single table ARN (no `Scan`/`BatchGetItem`/`UpdateItem`/
+  `DeleteItem`). Known breadth: IAM `LeadingKeys` can't restrict to the
+  `FLEET` partition / `STATE` sort key (same caveat as the batcher); held
+  by code review + single call sites + tests.
+- **§3 `reserved_concurrent_executions = -1` (Accept, comment present).**
+  New-account concurrency floor (min-10-unreserved) blocks a reservation,
+  same as the batcher. Safe: the FLEET STATE row is idempotent-overwrite
+  and the edge-trigger GetItem→PutItem is at-most-once-per-edge. Annotated
+  in `main.tf`. Restore to 1 after a quota bump.
+- **§4 log-group race / §5 env known-after-apply (Accept, no change).** The
+  `depends_on` creation order is correct; the env block reads opaque in
+  `plan` only because `SNS_TOPIC_ARN` is known-after-apply (same as the
+  scorer) — not masking the static `DDB_TABLE_NAME`/`FLEET_SIZE`.
+- **§6 teardown (Accept, no change — by design).** The sweep keeps its
+  *verify-don't-delete* charter: `terraform destroy` deletes the rule +
+  target + permission (the target cascades with the rule; the permission
+  is removed with the function), and the sweep FAILS loudly on any
+  residue. Manual `remove-targets`/`delete-rule` is declined — it would
+  diverge from the batcher rule's identical assert-absence handling.
+- **Extras (verified, no change).** numpy pinned to `2.4.6` (matches the
+  scorer's `lambda_requirements.txt` — mode parity); `memory_mb=256` /
+  `timeout_s=30` defaults present and plan-confirmed; `module.sns`
+  dependency is tracked via the `topic_arn` reference; `retention_in_days
+  = 7` set.

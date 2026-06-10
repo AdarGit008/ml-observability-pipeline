@@ -70,3 +70,12 @@ output "iot_policy_name" {
   description = "Shared fleet policy name — aws_teardown.sh sweeps by it."
   value       = module.iot_fleet.policy_name
 }
+
+output "fleet_psi_function_name" {
+  value = module.fleet_psi.function_name
+}
+
+output "fleet_psi_schedule_rule_name" {
+  description = "EventBridge rule name for the fleet-PSI Lambda — aws_teardown.sh checks its absence."
+  value       = module.fleet_psi.schedule_rule_name
+}

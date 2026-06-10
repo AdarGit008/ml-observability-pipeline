@@ -1,0 +1,18 @@
+# Drift-only deploy-zip dependencies for the fleet-PSI Lambda (ADR 0018
+# §Decision 6). numpy ALONE — NO scikit-learn, NO scipy, NO joblib, NO
+# model.pkl: there is no score path on the fleet Lambda, and
+# load_reference skips the model/reference version check when model.pkl
+# is absent (ADR 0007 §4). This is the "drift without sklearn" layer the
+# shared/drift.py docstring anticipated — a much lighter zip than the
+# scorer's sklearn stack (scripts/lambda_requirements.txt).
+#
+# boto3 is intentionally absent: the Lambda runtime provides it (infra
+# session #1 lock; bundling botocore blows the 50 MB direct-upload zip
+# limit).
+#
+# PINNED to the scorer's numpy (scripts/lambda_requirements.txt) — the
+# version the moto suite + the PO venv that built the reference ran
+# against. compute_psi is numpy-only; one numpy across both deploy zips
+# keeps the parity surface (shared/drift.py) running on identical
+# numerics.
+numpy==2.4.6

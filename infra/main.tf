@@ -6,7 +6,8 @@
 # (ADR 0012), scorer Lambda + packaging, IoT Rule trigger (+ republish
 # error_action), scoped IAM, fleet-snapshot adapter Lambda + Function
 # URL (ADR 0014), S3 archive bucket + Glue Catalog table + batcher
-# Lambda on an EventBridge schedule (ADR 0015).
+# Lambda on an EventBridge schedule (ADR 0015) + fleet-PSI Lambda on a
+# 5-minute EventBridge schedule (ADR 0018).
 # IoT Thing/cert provisioning: modules/iot_fleet (simulator identity,
 # ADR 0016, 2026-06-07). Out of scope (later sessions): CI.
 #
@@ -14,12 +15,13 @@
 #   1. .\scripts\build_lambda.ps1        # stages .build/lambda_dist/
 #   2. .\scripts\build_adapter.ps1       # stages .build/adapter_dist/
 #   3. .\scripts\build_batcher.ps1       # stages .build/batcher_dist/
-#   4. cd infra && terraform init
-#   5. terraform validate
-#   6. terraform plan                    # review resource list — no apply in-session
+#   4. .\scripts\build_fleet_psi.ps1     # stages .build/fleet_psi_dist/
+#   5. cd infra && terraform init
+#   6. terraform validate
+#   7. terraform plan                    # review resource list — no apply in-session
 #
 # The archive_file data sources read the staged .build/ trees at plan
-# time, so ALL THREE build scripts MUST run before terraform plan
+# time, so ALL FOUR build scripts MUST run before terraform plan
 # (validate works without them).
 
 module "dynamodb" {
@@ -100,6 +102,22 @@ module "lambda_s3_batcher" {
   schedule_expression = var.batcher_schedule_expression
   dist_dir            = abspath("${path.root}/../.build/batcher_dist")
   zip_output_path     = abspath("${path.root}/../.build/lambda_s3_batcher.zip")
+}
+
+# --- Fleet-PSI drift detector (ADR 0018) ---
+
+module "fleet_psi" {
+  source              = "./modules/fleet_psi"
+  function_name       = var.fleet_psi_function_name
+  table_name          = var.ddb_table_name
+  table_arn           = module.dynamodb.table_arn
+  topic_arn           = module.sns.topic_arn      # reuses the scorer's alert topic (ADR 0018 §Decision 4)
+  code_bucket         = module.s3_archive.bucket_name # S3 deploy path, same as scorer/batcher (DeepSeek review 2026-06-10 §2)
+  aws_region          = var.aws_region
+  fleet_size          = var.fleet_size
+  schedule_expression = var.fleet_psi_schedule_expression
+  dist_dir            = abspath("${path.root}/../.build/fleet_psi_dist")
+  zip_output_path     = abspath("${path.root}/../.build/lambda_fleet_psi.zip")
 }
 
 # --- IoT fleet identity (ADR 0016) ---

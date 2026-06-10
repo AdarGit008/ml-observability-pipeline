@@ -85,3 +85,15 @@ variable "iot_policy_name" {
   type        = string
   default     = "pump-fleet-policy"
 }
+
+variable "fleet_psi_function_name" {
+  description = "Name of the fleet-PSI Lambda (ADR 0018). aws_teardown.sh derives the role, log-group, and EventBridge-rule names from it."
+  type        = string
+  default     = "pump-fleet-psi"
+}
+
+variable "fleet_psi_schedule_expression" {
+  description = "Fleet-PSI cadence (ADR 0018 §Decision 1 — the aggregated 5-minute fleet window of PLAN.md §2.7)."
+  type        = string
+  default     = "rate(5 minutes)"
+}

@@ -27,6 +27,12 @@
 #   - Lambda                pump-s3-batcher (+ log group)
 #   - EventBridge rule      pump-s3-batcher-schedule
 #
+# Fleet-PSI (ADR 0018, fleet-psi infra session 2026-06-10):
+#   - Lambda                pump-fleet-psi          (+ log group)
+#   - IAM role              pump-fleet-psi-exec
+#   - EventBridge rule      pump-fleet-psi-schedule
+#   - FLEET STATE row       pump_id="FLEET" (swept with the table; no separate delete)
+#
 # IoT fleet (ADR 0016, iot-fleet session 2026-06-07):
 #   - IoT Things           P-00..P-(FLEET_SIZE-1)
 #   - IoT policy           pump-fleet-policy (shared, thing-variable scoped)
@@ -47,7 +53,7 @@
 #
 # Usage:  ./scripts/aws_teardown.sh [--destroy-only | --verify-only]
 # Env overrides (defaults match infra/variables.tf):
-#   DDB_TABLE_NAME, SCORER_FN, ADAPTER_FN, BATCHER_FN, SNS_TOPIC_NAME,
+#   DDB_TABLE_NAME, SCORER_FN, ADAPTER_FN, BATCHER_FN, FLEET_FN, SNS_TOPIC_NAME,
 #   IOT_RULE_NAME, GLUE_DB_NAME, GLUE_TABLE_NAME, PROJECT_TAG, BUCKET_NAME,
 #   FLEET_SIZE, IOT_POLICY_NAME
 set -uo pipefail
@@ -61,6 +67,7 @@ ADAPTER_FN="${ADAPTER_FN:-pump-dashboard-adapter}"
 SNS_TOPIC_NAME="${SNS_TOPIC_NAME:-ml-obs-pipeline-pump-alerts}"
 IOT_RULE_NAME="${IOT_RULE_NAME:-pump_telemetry_to_scorer}"
 BATCHER_FN="${BATCHER_FN:-pump-s3-batcher}"
+FLEET_FN="${FLEET_FN:-pump-fleet-psi}"
 GLUE_DB_NAME="${GLUE_DB_NAME:-pump_archive}"
 GLUE_TABLE_NAME="${GLUE_TABLE_NAME:-pump_readings}"
 PROJECT_TAG="${PROJECT_TAG:-ml-obs-pipeline}"
@@ -134,7 +141,7 @@ else
   ok "no SNS subscriptions for $SNS_TOPIC_NAME"
 fi
 
-for FN in "$SCORER_FN" "$ADAPTER_FN" "$BATCHER_FN"; do
+for FN in "$SCORER_FN" "$ADAPTER_FN" "$BATCHER_FN" "$FLEET_FN"; do
   if aws lambda get-function --function-name "$FN" \
        --region "$REGION" >/dev/null 2>&1; then
     fail "Lambda $FN still exists"
@@ -165,7 +172,7 @@ else
   ok "IoT rule $IOT_RULE_NAME gone"
 fi
 
-for ROLE in "${SCORER_FN}-exec" "${ADAPTER_FN}-exec" "${BATCHER_FN}-exec" \
+for ROLE in "${SCORER_FN}-exec" "${ADAPTER_FN}-exec" "${BATCHER_FN}-exec" "${FLEET_FN}-exec" \
             "${IOT_RULE_NAME}_error_republish"; do
   if aws iam get-role --role-name "$ROLE" >/dev/null 2>&1; then
     fail "IAM role $ROLE still exists"
@@ -201,6 +208,13 @@ if aws events describe-rule --name "${BATCHER_FN}-schedule" \
   fail "EventBridge rule ${BATCHER_FN}-schedule still exists"
 else
   ok "EventBridge rule ${BATCHER_FN}-schedule gone"
+fi
+
+if aws events describe-rule --name "${FLEET_FN}-schedule" \
+     --region "$REGION" >/dev/null 2>&1; then
+  fail "EventBridge rule ${FLEET_FN}-schedule still exists"
+else
+  ok "EventBridge rule ${FLEET_FN}-schedule gone"
 fi
 
 # ---------------------------------------------- iot-fleet sweep (ADR 0016)
