@@ -42,9 +42,9 @@ variable "timeout_s" {
 }
 
 variable "reserved_concurrency" {
-  description = "Reserved concurrent executions — caps worst-case spend + table read pressure from the public URL (2026-06-04 review Q1). One Grafana instance needs ~1."
+  description = "Reserved concurrent executions — caps worst-case spend + table read pressure from the public URL (2026-06-04 review Q1). One Grafana instance needs ~1. Set to -1 (no reservation) 2026-06-07: the account's Lambda concurrency quota sits at the new-account floor, so ANY reservation violates the min-10-unreserved rule. Restore to 5 after a Service Quotas increase."
   type        = number
-  default     = 5
+  default     = -1
 }
 
 variable "dist_dir" {

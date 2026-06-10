@@ -36,8 +36,8 @@ from dashboards_adapter.tests.conftest import get_event, put_state_row
 
 def test_full_fleet_snapshot(fresh_adapter):
     handler_mod, table = fresh_adapter
-    for i in range(1, 16):
-        put_state_row(table, f"P-{i:02d}", score=i / 100)
+    for i in range(15):
+        put_state_row(table, f"P-{i:02d}", score=(i + 1) / 100)
 
     resp = handler_mod.handler(get_event(), None)
 
@@ -82,11 +82,11 @@ def test_pump_entry_shape_and_flattened_psi(fresh_adapter):
 
 def test_pumps_sorted_by_pump_id(fresh_adapter):
     handler_mod, table = fresh_adapter
-    for pid in ("P-09", "P-01", "P-15", "P-03"):
+    for pid in ("P-09", "P-00", "P-14", "P-03"):
         put_state_row(table, pid)
 
     body = json.loads(handler_mod.handler(get_event(), None)["body"])
-    assert [p["pump_id"] for p in body["pumps"]] == ["P-01", "P-03", "P-09", "P-15"]
+    assert [p["pump_id"] for p in body["pumps"]] == ["P-00", "P-03", "P-09", "P-14"]
 
 
 # --- §Partial fleet ---
@@ -95,7 +95,7 @@ def test_partial_fleet_omits_missing_pumps(fresh_adapter):
     """Unscored pumps are ABSENT — no null-filled placeholder rows
     (ADR 0014 §Decision 2); the envelope counts carry the gap."""
     handler_mod, table = fresh_adapter
-    for i in range(1, 14):  # 13 of 15 reporting
+    for i in range(13):  # 13 of 15 reporting
         put_state_row(table, f"P-{i:02d}")
 
     body = json.loads(handler_mod.handler(get_event(), None)["body"])
@@ -103,7 +103,7 @@ def test_partial_fleet_omits_missing_pumps(fresh_adapter):
     assert body["fleet_size"] == 15
     assert body["pumps_reporting"] == 13
     reported = {p["pump_id"] for p in body["pumps"]}
-    assert "P-14" not in reported and "P-15" not in reported
+    assert "P-13" not in reported and "P-14" not in reported
 
 
 def test_reading_rows_never_leak_into_snapshot(fresh_adapter):
@@ -242,7 +242,7 @@ def test_single_batch_get_item_per_invocation(fresh_adapter):
     """ONE BatchGetItem per panel refresh (ADR 0010 access pattern;
     ADR 0013 cost posture) — not 15 GetItems, not a Query, not a Scan."""
     handler_mod, table = fresh_adapter
-    for i in range(1, 16):
+    for i in range(15):
         put_state_row(table, f"P-{i:02d}")
 
     with mock.patch.object(
@@ -280,7 +280,7 @@ def test_fleet_size_env_expands_pump_ids(fresh_adapter, monkeypatch):
     monkeypatch.setenv("FLEET_SIZE", "3")
     importlib.reload(handler_mod)
     try:
-        assert handler_mod.FLEET_PUMP_IDS == ("P-01", "P-02", "P-03")
+        assert handler_mod.FLEET_PUMP_IDS == ("P-00", "P-01", "P-02")
     finally:
         monkeypatch.delenv("FLEET_SIZE")
         importlib.reload(handler_mod)

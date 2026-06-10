@@ -20,7 +20,7 @@ Hot-path Lambda. One invocation per MQTT message via IoT Rule. Reads recent feat
 ## Resource sizing
 - 512 MB memory.
 - Bundled model pickle in deployment package (HANDOFF §6 Q3 default; ADR 0006 §Q4 measured ~124 MB unzipped, ~50% headroom against Lambda's 250 MB ceiling). SNS client is the same boto3 already in the zip — no new dep.
-- Cold-start latency target: <2 s. Reference + model + boto3 clients warm at module import; classifier lazy-loads on first `score()` call. Measure (not assume) post-deploy.
+- Cold-start latency target: <2 s (aspirational). **Measured 2026-06-07 first live apply: Init ~4.76–4.83 s, warm ~43 ms, 272 MB / 512 MB peak** — see Open questions. Reference + model + boto3 clients warm at module import; classifier lazy-loads on first `score()` call.
 - Volume: 15 pumps × 30 msg/min × 30-min demo ≈ 13.5 K invocations per demo. Per invocation: one `Query` (≤1800 rows), one `GetItem`, two `PutItem`s, ~2 ms of PSI numpy. SNS volume bounded by incident count, not invocation count (edge-trigger) — well inside Always-Free 1M Lambda req/mo, 25 RCU/WCU-equivalent DynamoDB, and 1 K SNS email deliveries/mo.
 
 ## Environment variables
@@ -30,7 +30,8 @@ Hot-path Lambda. One invocation per MQTT message via IoT Rule. Reads recent feat
 - `AWS_REGION` — defaults to `eu-central-1` per `_global.md` Hard constraint #5.
 
 ## Open questions
-- Cold-start latency — to be measured post-deploy (now includes the SNS client construction; expected negligible). Bundle-vs-S3-cold-load decision per ADR 0006 §Q4 (fall-back to S3 cold-load pre-authorized without an ADR amendment if measurement exceeds <2 s target).
+- ~~Cold-start latency (measure post-deploy)~~ — **MEASURED 2026-06-07:** Init ~4.76–4.83 s, warm ~43 ms, 272 MB / 512 MB peak (two cold containers from the 15-way first-publish fan-out). Init exceeds the <2 s aspirational target but sits well inside the 10 s timeout; the hot path is async (IoT→Lambda, no user waiting) so only the first 1–2 invocations of a fan-out pay it. ADR 0006 §Q4's pre-authorized S3-cold-load fallback is therefore not triggered — recorded as informed-by-data; reopen only if a change pushes Init toward the timeout.
+- **PSI warmup alert storm (NEW, 2026-06-07) — needs its own parity-aware brief.** On a `healthy` fleet, 9/14 pumps fired `alert_flag: true` within minute 1: max-PSI > 0.25 on sub-minute sample windows (scores all ≤0.02, far below the 0.7 threshold). Edge-triggered SNS fired fleet-wide on PSI noise from tiny windows. Fix direction: a min-sample warmup gate before PSI alerts arm. Touches `shared.drift` / the drift surface → parity set (DEV_NORMS §5 Tier 2b); out of scope for the bookkeeping session that recorded it.
 
 ## Related ADRs
 - ADR 0005 — parity boundary (`shared/{features,score,drift}`). Four structural-parity tests in `lambda_scorer/tests/test_handler.py` enforce (`compute_psi` guard added by the PSI follow-on).

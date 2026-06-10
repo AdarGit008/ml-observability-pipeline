@@ -22,8 +22,9 @@ Single local Grafana instance with two datasources. Renders fleet health, per-pu
 - **Out:** Grafana at `localhost:3000`, both dashboards provisioned at boot.
 
 ## Open questions
-- Infinity verify-don't-assume items, checkable only at first AWS apply: relative-URL-against-datasource-base behavior, and `null` `last_alert_sent_at` through the frontend parser's special-value mapping (2026-06-04 review Q6; column pinned `type: string` defensively).
-- `FLEET_SIZE` (Terraform var → adapter env) duplicates the simulator fleet size — drift means silently short snapshots (`pumps_reporting` exposes it). Single-source-of-truth fix if it ever bites.
+- **Infinity relative-URL-against-datasource-base behavior — REMAINS OPEN.** Unobserved at the 2026-06-07 first live apply: Grafana was never opened against the live adapter that run (the apply exercised the data plane only). Still checkable only with a Grafana session pointed at a live Function URL — carries to demo-day rehearsal.
+- ~~`null` `last_alert_sent_at` through the frontend special-value mapping~~ — **CLOSED 2026-06-07.** Resolved from the ADR 0014 contract, not live observation: the column is pinned `type: string` with a null→"never" display map, so the wire-null path is contractually handled. Live the value was never null anyway — the PSI warmup storm set `last_alert_sent_at` on ≈every pump within minute 1 (2026-06-07 session log), so no null row ever rendered. Contract + non-observation together close it.
+- ~~`pumps_reporting` short-snapshot drift~~ — **off-by-one found and fixed live 2026-06-07.** `FLEET_PUMP_IDS` enumerated `P-01..P-15` (1-indexed); real fleet is `P-00..P-14`, so the adapter queried a nonexistent P-15 and skipped P-00 → `pumps_reporting: 14`. Fixed in `dashboards_adapter/handler.py` + 7 test patches (17/17 pass); NOT redeployed before teardown → `pumps_reporting == 15` is a redeploy-verify at the next apply. The underlying `FLEET_SIZE`-duplicates-simulator-fleet-size single-source-of-truth concern stands (now demonstrated to bite); revisit if it recurs.
 
 ## Related ADRs
 - ADR 0014 — adapter API contract + Infinity + AuthType=NONE (this component's founding decision).

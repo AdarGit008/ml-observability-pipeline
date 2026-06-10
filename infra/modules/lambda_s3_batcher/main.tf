@@ -40,7 +40,7 @@ resource "aws_s3_object" "code" {
   bucket = var.bucket_name
   key    = "deploy/${var.function_name}.zip"
   source = data.archive_file.dist.output_path
-  etag   = data.archive_file.dist.output_md5
+  source_hash = data.archive_file.dist.output_md5 # multipart-safe (not etag): avoids phantom diff on >5MB zips (2026-06-07 live-apply lesson)
 }
 
 resource "aws_cloudwatch_log_group" "batcher" {
@@ -129,7 +129,11 @@ resource "aws_lambda_function" "batcher" {
   # watermark read-advance cycle and double-archive the window —
   # at-least-once is the contract (ADR 0015), but concurrency-1 keeps
   # the duplicate path to genuine failures, not scheduling jitter.
-  reserved_concurrent_executions = 1
+  # 2026-06-07: -1 (no reservation) — account concurrency quota is at the
+  # new-account floor; any reservation violates min-10-unreserved. Overlap
+  # needs a >60s stuck invocation (timeout is 30s); duplicates stay covered
+  # by the ADR 0015 at-least-once contract. Restore to 1 after quota bump.
+  reserved_concurrent_executions = -1
 
   s3_bucket        = aws_s3_object.code.bucket
   s3_key           = aws_s3_object.code.key

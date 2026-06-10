@@ -49,7 +49,7 @@ resource "aws_s3_object" "code" {
   bucket = var.code_bucket
   key    = "deploy/${var.function_name}.zip"
   source = data.archive_file.dist.output_path
-  etag   = data.archive_file.dist.output_md5 # re-upload when the zip changes
+  source_hash = data.archive_file.dist.output_md5 # multipart-safe (not etag): avoids phantom diff on >5MB zips (2026-06-07 live-apply lesson)
 }
 
 resource "aws_lambda_function" "scorer" {

@@ -45,6 +45,8 @@ The `archive_file` data sources read the `.build/` trees at plan time — ALL TH
 
 ## Open questions
 - ~~mTLS provisioning flow for IoT Core Things~~ — **RESOLVED 2026-06-07 (ADR 0016):** Terraform-generated certs in `modules/iot_fleet`, keys in local-only state, material written to `simulator/.secrets/` at apply.
+- **Reserved concurrency forced to -1 (both Lambdas), 2026-06-07.** New-account concurrency floor (min 10 unreserved) rejects ANY reservation: adapter 5 → -1 (module default), batcher 1 → -1. Restore the watermark-race guard (batcher=1) + adapter cap after a Service Quotas increase; comments in both modules updated. Live-apply lesson.
+- **`aws_s3_object` + `etag = filemd5` re-uploads >5 MB zips every apply, 2026-06-07.** Provider uploads multipart → S3 ETag `<hash>-N` ≠ MD5 → phantom diff → re-upload every apply (compounded by flaky local DNS mid-multipart). Worked around live with `aws s3api put-object` (single PUT, ETag = MD5) + `terraform import`. Durable fix LANDED 2026-06-10 (review F3): both s3-object modules use `source_hash` (multipart-safe) instead of `etag` — forces one re-upload on the next apply (the rehearsal).
 
 ## Related ADRs
 - ADR 0005 §Addendum Q1 — build-script staging answer to multi-root packaging.

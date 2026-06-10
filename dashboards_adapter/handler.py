@@ -41,7 +41,7 @@ Design rules (the ADR's Principle: a projection, not a brain):
 Environment variables:
 
 - ``DDB_TABLE_NAME`` — hot-state table (default ``pump_hot_state``).
-- ``FLEET_SIZE`` — pump count, expanded to ``P-01..P-NN`` per the
+- ``FLEET_SIZE`` — pump count, expanded to ``P-00..P-{NN-1}`` per the
   ``_interfaces.md`` pump-id format. Must be 1..99 (the format is
   two-digit zero-padded); validated at cold start, fail-fast.
 - ``DDB_ENDPOINT_URL`` — local-test affordance, same as the scorer.
@@ -88,10 +88,12 @@ if not 1 <= FLEET_SIZE <= 99:
     )
 
 # The exact BatchGetItem key set. Generated, not configured per-pump:
-# the simulator names pumps P-01..P-NN and the scorer keys STATE rows
-# by the same ids (ADR 0010).
+# the simulator names pumps P-00..P-{NN-1} (0-indexed — terraform
+# aws_iot_thing.pump[count.index] and the scorer key STATE rows by the
+# same ids, ADR 0010/0016). Fixed 2026-06-07 (live apply): was 1-indexed
+# P-01..P-NN, which queried a nonexistent P-15 and never asked for P-00.
 FLEET_PUMP_IDS: tuple[str, ...] = tuple(
-    f"P-{i:02d}" for i in range(1, FLEET_SIZE + 1)
+    f"P-{i:02d}" for i in range(FLEET_SIZE)
 )
 
 # boto3 resource — module-level so the connection is shared across

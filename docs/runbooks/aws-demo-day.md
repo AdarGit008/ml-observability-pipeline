@@ -24,6 +24,27 @@ Teardown after EVERY demo, no exceptions.
 - [ ] First-ever apply: click the SNS subscription confirmation email
   or alerts never fire.
 
+## 0.5 Pre-demo checks (every apply)
+
+- [ ] **Reserved concurrency vs account quota** (2026-06-07 live-apply
+  lesson; 2026-06-10 review F4). Both Lambdas ship with
+  `reserved_concurrent_executions = -1` (no reservation) because the
+  new-account Lambda concurrency quota sits at the floor — min-10-unreserved
+  rejects ANY reservation. **If the account quota has since been raised
+  above the floor**, restore the caps before applying:
+    - `dashboards_adapter` -> `reserved_concurrency = 5` (variable default,
+      `infra/modules/dashboards_adapter/variables.tf`)
+    - `lambda_s3_batcher` -> `reserved_concurrent_executions = 1`
+      (`infra/modules/lambda_s3_batcher/main.tf`)
+  then `terraform apply` and confirm no quota-violation error.
+- [ ] **Uncapped public adapter URL while the stack is up** (2026-06-10
+  review F2). With `reserved_concurrency = -1` the adapter Function URL
+  (AuthType=NONE, ADR 0014) can scale to the account concurrency limit —
+  unauthenticated and uncapped. Standing exposure is zero (teardown after
+  every demo), but during a demo there is no in-demo throttle. Watch
+  CloudWatch `AWS/Lambda ConcurrentExecutions` for `pump-dashboard-adapter`;
+  if it spikes unexpectedly, take the stack down (`aws_teardown.sh`).
+
 ## 1. Build + apply (PowerShell, repo root)
 
 ```powershell
@@ -110,6 +131,18 @@ Items checkable only against a live stack (`context/dashboards.md`
   measurement lives in `context/lambda_scorer.md` open items.
 
 ## 4. Teardown (mandatory)
+
+The `.sh` scripts run through Git Bash, whose PATH does NOT include
+`aws`/`terraform` (they resolve in PowerShell but not bash). Invoke
+with both install dirs prepended (verified 2026-06-07):
+
+```powershell
+& "C:\Program Files\Git\bin\bash.exe" -lc 'export PATH="/c/Program Files/Amazon/AWSCLIV2:/c/Users/adar0/AppData/Local/Microsoft/WinGet/Packages/Hashicorp.Terraform_Microsoft.Winget.Source_8wekyb3d8bbwe:$PATH"; cd "/d/Claude/ML Observability Pipeline"; aws --version; terraform -version; bash scripts/aws_teardown.sh'
+```
+
+(The `aws --version` / `terraform -version` prefix is the sanity check —
+if they print, the script finds them.) Equivalent if `aws`/`terraform`
+are already on bash's PATH:
 
 ```bash
 ./scripts/aws_teardown.sh

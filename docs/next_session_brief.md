@@ -1,72 +1,83 @@
-# Next session brief — first live AWS end-to-end apply (+ cold-start canary)
+# Next session brief — PSI warmup gate (parity-aware): stop the minute-1 false-alert storm
+
+## ⚠ PARITY-SET SESSION — Tier 2b loads are MANDATORY
+This session touches the **drift surface** (`shared.drift` / PSI alert arming).
+Per DEV_NORMS §5 Tier 2b and the locked mode-parity contract (ADR 0005), you
+MUST load — IN ADDITION to Tier 2 — `shared/{features,score,drift}.py` plus
+ADR 0005 / 0007 / 0009 / 0012. **If this brief is ever loaded WITHOUT those
+Tier 2b loads, STOP and alert the PO before any work** (memory:
+`ml-obs-pipeline-parity-load-check`).
 
 ## Goal
-Run the full AWS demo path for real, once: `terraform apply` → simulator
-aws-mode (15 pumps) → hot path scores → Grafana `aws.json` renders →
-cold path archives → `aws_teardown.sh` proves absence. Close every
-"verify at first apply" item the dry sessions accumulated, measure the
-scorer's cold start, and record what reality disagreed with.
+Add a **minimum-sample warmup gate** so PSI-based alerts don't arm until a
+pump's window holds enough data for PSI to be meaningful. Fixes the
+2026-06-07 live finding: on a `healthy` fleet, 9/14 pumps fired
+`alert_flag: true` within minute 1 — max-PSI > 0.25 on sub-minute sample
+windows (scores all ≤ 0.02, far below the 0.7 score threshold). Edge-triggered
+SNS fired fleet-wide on PSI noise from tiny windows.
 
-## NOT a parity-set session
-Live verification + fixes. If any fix reaches into `shared/`, STOP and
-re-brief per DEV_NORMS §5 (Tier 2b loads).
+## The crux — this is a parity problem, not a lambda_scorer-only fix
+PSI is computed by `shared.drift.compute_psi`, called identically in BOTH modes
+(lambda_scorer AND local_runtime). The gate must behave identically in both or
+it's a north-star-#6 parity break. Two candidate shapes — decide with an ADR:
+- **(A) Gate inside `shared/`** — e.g. a `psi_is_armed(window)` helper (or a
+  not-armed signal from `compute_psi`) both modes consume. Keeps the logic in
+  the parity contract; likely the right home.
+- **(B) Gate in the alert-arming logic** (lambda_scorer SNS edge-trigger +
+  local_runtime equivalent) — both call sites must apply the SAME threshold via
+  a shared constant + a structural-parity test, or they drift.
+The threshold itself (require the full reference-window count? ≥ X readings?)
+needs justification tied to ADR 0007's PSI cadence/formula. Evidence: the
+2026-06-07 data (scores ≤ 0.02 but PSI > 0.25 on sub-minute windows).
 
-## Hard preconditions (before any AWS call)
-1. **Dashboards #2 commit landed FIRST** (explicit-path staging — its
-   draft is in `docs/sessions/2026-06-04-dashboards-grafana-json-pair.md`),
-   then the iot-fleet commit (draft in
-   `docs/sessions/2026-06-07-simulator-iot-fleet-provisioning.md`).
-   Both cascades run + dispositions folded pre-commit (DEV_NORMS §7).
-2. iot-fleet PO-side checks green: `terraform init` (new local/http
-   providers), all THREE build scripts, `terraform validate` + `plan`.
-3. One-time: Console-provisioned P-00 deleted (runbook §0).
+## Context — what the 2026-06-10 wrap-up left
+- Live apply (2026-06-07) verified end-to-end; teardown clean; cost ~$0.01/run
+  (~10× under the ADR 0013 ceiling). Stack is DOWN; $0 posture.
+- Two commits landed 2026-06-10: **Commit A** (review tooling — DeepSeek-only
+  `run_review.{ps1,sh}`, ADR 0011 §Addendum) and **Commit B** (live-apply
+  wrap-up — adapter off-by-one fix, reserved concurrency -1, `source_hash`
+  swap, context closures, cost actuals, runbook §0.5 guards).
+- Reviewer is now **DeepSeek-only**: `.\scripts\run_review.ps1 -Slug <slug>`,
+  key in gitignored `scripts/review_keys.local.ps1` (ADR 0011 §Addendum
+  2026-06-10).
+- The PSI warmup storm was deliberately deferred from the wrap-up to THIS
+  brief because it touches the parity surface.
 
-## In-scope (in order)
-1. Walk `docs/runbooks/aws-demo-day.md` end-to-end, PO driving, Claude
-   navigating + debugging. Sandbox makes NO live AWS calls — PO pastes
-   outputs/errors.
-2. Close the verify-don't-assume items where they live:
-   `context/dashboards.md` §Open questions (Infinity relative-URL vs
-   base; `null last_alert_sent_at` rendering) + `pumps_reporting` → 15.
-3. Cold-start canary: first-invocation vs warm duration from the
-   scorer's log group; record in `context/lambda_scorer.md` open items.
-4. Watch the cost surfaces live: DynamoDB consumed units vs ADR 0013's
-   math, one Parquet/min in S3 (ADR 0015), IoT free-tier meter (ADR
-   0016). Record actuals vs predictions in the session log.
-5. `aws_teardown.sh` full run — sweep must exit 0 (first exercise of
-   the iot-fleet sweep against real residue).
-6. Session log + any fix diffs → cascade → dispositions → commit
-   (normal §7 sequence; no deferral expected this time).
+## NOT in scope (other deferred items — pick later)
+- Demo-day rehearsal: redeploy the adapter + verify `pumps_reporting == 15`
+  live; open Grafana vs the live URL to close the Infinity relative-URL open
+  item (`context/dashboards.md`).
+- Restore reserved concurrency (adapter→5 / batcher→1) after a Service Quotas
+  bump — runbook §0.5 checklist.
+- CI cost guardrails (last `[ ]` in `context/infra.md`).
+- README / portfolio polish (cost table citing ADR 0013 + the $0.01 live actual).
 
 ## Loads
-- Tier 1: `context/_global.md`, DEV_NORMS §7 + §8.
-- Tier 2: `context/infra.md`.
-- Tier 3: `context/_interfaces.md` (only if a wire shape misbehaves),
-  `context/dashboards.md` (§Open questions), `context/simulator.md`
-  (§AWS-mode), `docs/runbooks/aws-demo-day.md` (the script).
-- ADRs: 0013/0015/0016 (cost predictions to check against actuals),
-  0014 (adapter contract if panels misrender).
-- Memory: fuse-write-truncation, git-on-windows, infra-sessions.
+- Tier 1: `context/_global.md`, DEV_NORMS §5 (Tier 2b) + §8.
+- Tier 2: `context/lambda_scorer.md`, `context/drift.md`.
+- **Tier 2b (MANDATORY — parity):** `shared/{features,score,drift}.py`;
+  ADR 0005, ADR 0007, ADR 0009, ADR 0012.
+- Tier 3: `context/_interfaces.md` (§SNS alert payload, §PSI parameters).
+- Memory: `ml-obs-pipeline-parity-load-check`,
+  `ml-obs-pipeline-live-apply-2026-06-07`,
+  `ml-obs-pipeline-fuse-write-truncation`, `ml-obs-pipeline-git-on-windows`.
 
 ## Constraints
-- $0 posture: this demo SPENDS the ADR 0013 dimes — bound the run
-  (~30 min target), teardown immediately, no second apply without
-  reason. Budget alerts must stay green.
-- Terraform/AWS CLI/git all PO-side. Bash 45 s cap. FUSE rules
-  (existing files bash-rewrite; NEW via Write; never Edit on D:\).
-  BOM-free commit sequence.
+- Parity-aware: any drift/alert-surface change keeps
+  `test_structural_parity_no_vendoring` (+ siblings) green and applies
+  identically in both modes.
+- Likely needs an ADR (where the gate lives + the threshold) — north star #6:
+  local/AWS divergence is a bug or an ADR.
+- Git PO-side; FUSE rules (existing files bash-rewrite, NEW via Write, never
+  Edit on D:); BOM-free commits (inline `-m`).
+- Reviewer: `run_review.ps1 -Slug <slug>` (DeepSeek).
+- No `terraform apply` unless a live re-verify is explicitly in scope.
 
 ## Definition of done
-- End-to-end observed: pumps publish → scores in DynamoDB → aws.json
-  panels live → Parquet accumulating → teardown sweep exits 0.
-- Dashboards + cold-start open items closed in their context files;
-  actual-vs-predicted costs logged.
-- Session log + cascade + dispositions + commit landed.
-- Close with AskUserQuestion: next focus (candidates: CI cost
-  guardrails; README/portfolio polish; demo-day rehearsal script).
-
-## Carried context
-- Suite baseline: **427 passed + 1 skipped** (iot-fleet session).
-- Fixes discovered live are in-scope if small; anything structural
-  becomes its own brief.
-- WATERMARK + STATE reserved-SK coexistence stands (`_interfaces.md`).
+- Gate implemented in the parity-correct location; threshold justified against
+  ADR 0007; ADR written for the decision.
+- Both modes proven equivalent: structural-parity tests green + a test that a
+  sub-minute window does NOT arm an alert while a full window with real drift
+  DOES.
+- Session log + context closures (`lambda_scorer.md` PSI-storm open item
+  closed, `drift.md` updated); DeepSeek cascade + dispositions + commit.
