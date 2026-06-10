@@ -107,6 +107,13 @@ Per invocation (PSI follow-on landed 2026-06-02):
 - `PutItem` on the STATE row `{PK=pump_id, SK="STATE", latest_ts, latest_score, latest_psi, alert_flag[, last_alert_sent_at]}`.
 - SNS publish on the False → True `alert_flag` flip only (ADR 0012; payload per §SNS alert payload below).
 
+## Fleet-PSI DynamoDB writes
+Per invocation (EventBridge `rate(5 minutes)`; ADR 0018, `lambda_fleet_psi`):
+- Per pump `P-01..P-NN`: `Query` the trailing 150-row window (`sk begins_with "2"`, `ScanIndexForward=False`) — same access pattern as the scorer; pooled across the fleet.
+- `GetItem` the FLEET STATE row (edge-trigger input, ADR 0012).
+- `PutItem` the FLEET STATE row `{pump_id="FLEET", sk="STATE", latest_ts, latest_psi (4-key Map), alert_flag, pumps_reporting[, last_alert_sent_at]}`. `FLEET` is a SEPARATE partition — invisible to the per-pump scorer/batcher iteration and the score-path query.
+- SNS publish on the False → True `alert_flag` flip only (ADR 0012); PSI-only payload (see §SNS alert payload, FLEET-scope note).
+
 ## S3 archive layout
 > **Mechanics locked 2026-06-04 by ADR 0015.**
 ```
@@ -133,6 +140,8 @@ s3://<bucket>/year=YYYY/month=MM/day=DD/hour=HH/<compact-cutoff>.parquet
 
 ## SNS alert payload
 Published when PSI > 0.25 OR P(failure_48h) > 0.7. Publish is **edge-triggered** (ADR 0012): only on the False → True flip of `alert_flag` — a persisting breach publishes once, not per-invocation. Topic ARN supplied via the `SNS_TOPIC_ARN` env var (required at Lambda cold-start).
+
+**FLEET-scope variant (ADR 0018, `lambda_fleet_psi`).** The fleet-PSI Lambda reuses this topic and edge-trigger but publishes a drift-only payload: `pump_id="FLEET"`, `scope="fleet"`, `alert_type="psi_breach"`, `score=null` (no model on the fleet path), the 4-key `psi` map, and `pumps_reporting`. Generic subscribers filter on `scope` (absent ⇒ per-pump); the per-pump payload is unchanged.
 ```json
 {
   "pump_id":    "P-07",

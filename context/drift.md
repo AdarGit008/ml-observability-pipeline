@@ -1,7 +1,7 @@
 # drift
 
 ## Purpose
-Shared PSI (Population Stability Index) implementation. Used identically by `lambda_scorer` (per-pump, hot path), `local_runtime` (per-pump in local mode), and the EventBridge-scheduled fleet-PSI Lambda (every 5 minutes, future session).
+Shared PSI (Population Stability Index) implementation. Used identically by `lambda_scorer` (per-pump, hot path), `local_runtime` (per-pump in local mode), and the EventBridge-scheduled fleet-PSI Lambda (`lambda_fleet_psi`, every 5 minutes; ADR 0018, handler shipped 2026-06-10 — pools the fleet's readings into one window).
 
 This is the single most architecturally important shared module: if local mode and AWS mode disagree about drift, the project's mode-parity claim collapses.
 
@@ -40,6 +40,7 @@ This is the single most architecturally important shared module: if local mode a
 - ~~**Warm-up gate.**~~ **CLOSED 2026-06-10 by ADR 0017.** The first live apply (2026-06-07) proved the cold-window problem is not benign: on a healthy fleet 9/14 pumps fired PSI-driven alerts within minute 1 (sub-minute windows; scores ≤ 0.02). The gate landed as a **shared** `psi_is_armed(window)` predicate + `PSI_MIN_SAMPLES = 150` constant in `shared.drift`, applied at the `lambda_scorer` alert-arming site (`psi_breach = psi_is_armed(window) and max(psi) > 0.25`). `compute_psi` is **unchanged** and still writes PSI on cold windows — the gate is on the *alert*, not the value — so the dashboard shows PSI warming up. `local_runtime` has no alert site so it is unaffected; the shared constant binds the future fleet-PSI Lambda (north star #6).
 
 ## Related ADRs
+- **ADR 0018** — fleet-PSI EventBridge Lambda (`lambda_fleet_psi`). Pools all pumps' 5-min windows into ONE `compute_psi` call; arms via the shared `psi_alert_should_fire`. Third consumer of `compute_psi` (with lambda_scorer + local_runtime). **Accepted** 2026-06-10 (DeepSeek pending).
 - **ADR 0017** — PSI warmup gate. `PSI_MIN_SAMPLES` + `psi_is_armed` in `shared.drift`; gates the `lambda_scorer` alert at 150 samples. Closes the Warm-up gate open question + the lambda_scorer PSI-storm finding (2026-06-07). `compute_psi` unchanged → parity tests green by construction. **Accepted** 2026-06-10 (DeepSeek review pending).
 - **ADR 0009** — PSI surface ≠ scorer feature set. Drops the four rolling features from PSI (still scorer inputs). Closes the autocorrelated-PSI-threshold-semantics open question. **Accepted** 2026-06-03 (Gemini-approved 2026-06-03).
 - **ADR 0008** — operational PSI reference (DEFAULT_PROFILES HEALTHY-only). Closes the ADR 0007 Reference-Validity carry-in. **Accepted** 2026-06-02 (Gemini review pending).
