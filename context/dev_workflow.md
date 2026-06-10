@@ -21,6 +21,7 @@ Bring this back to a `dev_workflow` session when **any** of these fire:
 - **2026-05-24 — `.gitignore` deferred-decision retired:** Landed Python + Terraform `.gitignore` as the first commit of the 2026-05-24 simulator session.
 - **2026-05-25 — RPM-coupling spec deviation:** Not a dev_workflow change per se, but the first time we exercised the "PLAN.md ↔ ADR divergence" path from DEV_NORMS §9. See **ADR 0002**.
 - **2026-06-02 — Multi-provider review cascade:** Extended the Gemini-only review path to a cascading provider chain `gemini → openrouter → groq → cerebras`, with per-response provenance footers as the audit signature. Triggered mid-lambda_scorer-MVP-review by a hard `429 RESOURCE_EXHAUSTED` from Gemini's free tier + a 503 on flash fallback. See **ADR 0011**. `scripts/gemini_review.ps1` keeps its filename despite the broadened scope (ADR 0011 §Decision #5).
+- **2026-06-10 — Review trimmed to DeepSeek-only + script renamed:** Collapsed the cascade to a single provider (DeepSeek `deepseek-reasoner`, OpenAI-compatible) after all four free-tier keys were rotated/invalid; renamed `scripts/gemini_review.{ps1,sh}` → `scripts/run_review.{ps1,sh}` (the vendor name no longer fit). Key in gitignored `scripts/review_keys.local.ps1`. See **ADR 0011 §Addendum 2026-06-10**.
 
 ## Known deferred decisions (do not pre-optimize)
 - No Makefile / `scripts/new_session.sh` yet — only add if scaffolding by hand becomes the bottleneck.

@@ -61,38 +61,26 @@ Each task is a unit of work small enough to finish in one session. Roughly: one 
 
 The adversarial-review role is held by a **pool of models**, not a single vendor. ADR 0001 set up the original Gemini-only path; **ADR 0011 (2026-06-02)** broadened it to a cascading multi-provider chain after a hard `429 RESOURCE_EXHAUSTED` from Gemini's free tier blocked a session-done workflow. All providers in the chain are classified identically — same role, same packet format, same "don't rubber-stamp" expectation. The choice of which one ran on a given response is captured as a **provenance footer** on the response file (load-bearing for audit; see below).
 
-The script `scripts/gemini_review.ps1` retains its name despite the broadened scope — it's a well-known entrypoint, and renaming would invalidate every past session log's commit-draft PowerShell sequence (ADR 0011 §Decision #5). Read the filename as "the script that runs the review", not "the script that calls Gemini".
+The script is `scripts/run_review.ps1` (renamed from `gemini_review.ps1` on 2026-06-10 when the review was trimmed to a single provider — ADR 0011 §Addendum 2026-06-10). Past session logs and review packets that name the old script are dated records, left as-is; their commit-draft command lines won't replay verbatim.
 
-**One-time setup (PO machine) — set whichever provider keys you have:**
+**One-time setup (PO machine):** put the DeepSeek key in `scripts/review_keys.local.ps1` (gitignored, auto-sourced by the script):
 ```powershell
-[Environment]::SetEnvironmentVariable("GEMINI_API_KEY",     "<your-key>", "User")  # https://aistudio.google.com/apikey
-[Environment]::SetEnvironmentVariable("OPENROUTER_API_KEY", "<your-key>", "User")  # https://openrouter.ai/keys
-[Environment]::SetEnvironmentVariable("GROQ_API_KEY",       "<your-key>", "User")  # https://console.groq.com/keys
-[Environment]::SetEnvironmentVariable("CEREBRAS_API_KEY",   "<your-key>", "User")  # https://cloud.cerebras.ai/?tab=api-keys
-# Open a new PowerShell window so the env vars load.
+# scripts/review_keys.local.ps1  — gitignored, never committed
+$env:DEEPSEEK_API_KEY = "<your-deepseek-key>"   # https://platform.deepseek.com/api_keys
 ```
 
-At minimum one key is required. The cascade skips providers whose env var isn't set.
+The `DEEPSEEK_API_KEY` is required; the script errors if it is unset.
 
-**Provider chain (default `-Provider auto`):** `gemini → openrouter → groq → cerebras`. Each provider's default free-tier model:
-
-| Provider | Default model | Why this default |
-|---|---|---|
-| gemini | `gemini-pro-latest` | Project's original reviewer; matches ADR 0001 baseline |
-| openrouter | `deepseek/deepseek-r1:free` | DeepSeek R1 is reasoning-optimised; OpenRouter committed to keeping it on free tier (2026-04-24 announcement) |
-| groq | `llama-3.3-70b-versatile` | Fastest free-tier inference; capacity pool independent of OpenRouter |
-| cerebras | `llama-3.3-70b` | Independent capacity pool from Groq; belt-and-suspenders |
+**Provider (default `-Provider auto`):** DeepSeek only. Default model `deepseek-reasoner` (R1, reasoning-optimised); pass `-Model deepseek-chat` for V3. The multi-provider cascade (gemini → openrouter → groq → cerebras) was retired 2026-06-10 (ADR 0011 §Addendum) and is recoverable from git history if free-tier fallbacks are wanted again.
 
 **Per-review flow:**
 
 1. Claude writes `review_packets/YYYY-MM-DD-<slug>.md` using `templates/review_packet_template.md`.
 2. PO runs (from the repo root):
    ```powershell
-   .\scripts\gemini_review.ps1 -Slug <slug>
-   # Force a specific provider (no cascade):
-   .\scripts\gemini_review.ps1 -Slug <slug> -Provider groq
-   # Override the first-tried model:
-   .\scripts\gemini_review.ps1 -Slug <slug> -Model gemini-2.5-flash
+   .\scripts\run_review.ps1 -Slug <slug>
+   # Override the model (DeepSeek V3 instead of the R1 reasoner default):
+   .\scripts\run_review.ps1 -Slug <slug> -Model deepseek-chat
    ```
    …which writes `review_responses/YYYY-MM-DD-<slug>.md` with a provenance footer naming the provider + model that wrote it.
 3. Claude reads the response, addresses each point in the packet's "Resolution" section, commits.

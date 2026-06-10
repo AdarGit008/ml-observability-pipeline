@@ -71,3 +71,6 @@ Thumbs.db
 
 # Lambda deploy staging (scripts/build_lambda.* output; archive_file input)
 .build/
+
+# Local reviewer-cascade API keys (gitignored; sourced by gemini_review.ps1)
+scripts/review_keys.local.*

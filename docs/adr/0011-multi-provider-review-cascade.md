@@ -351,3 +351,59 @@ hide the rename. Over-engineered for a one-word filename concern.
   model availability on OpenRouter), https://groq.com/pricing
   (Groq free-tier limits), https://cloud.cerebras.ai (Cerebras
   free-tier limits).
+
+## Addendum 2026-06-10 — Collapse to a single provider (DeepSeek) + generic script name
+
+- **Status:** Accepted (PO call 2026-06-10). This Addendum sets the
+  operative review mechanism going forward; the cascade Decision above is
+  retained as the historical record of the multi-provider era.
+
+**Context.** At the 2026-06-10 live-apply wrap-up review, all four cascade
+keys (`GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`,
+`CEREBRAS_API_KEY`) were rotated/invalid — every provider returned
+400/401/404. Rather than re-key four free tiers, the PO consolidated on a
+single DeepSeek API key under the PO's control.
+
+**Decision (the new norm).**
+
+1. **Single provider: DeepSeek.** `$providers` carries one entry —
+   `deepseek` → model `deepseek-reasoner` (R1), endpoint
+   `https://api.deepseek.com/chat/completions`, env `DEEPSEEK_API_KEY`.
+   DeepSeek is OpenAI-compatible, so it reuses the existing
+   `Invoke-OpenAICompat` helper; the Gemini-native path (`Invoke-Gemini`)
+   and the openrouter/groq/cerebras entries are removed. `-Provider auto`
+   resolves to `deepseek`.
+2. **Script renamed generic.** `scripts/gemini_review.{ps1,sh}` →
+   `scripts/run_review.{ps1,sh}`. This reverses Decision #5 / Alternative
+   §4-A ("keep `gemini_review.ps1`"): with Gemini no longer even in the
+   chain, the vendor name in the filename actively misleads. The
+   §Consequences negative "the script name lies" is resolved. Past session
+   logs and review packets that spell the old name are dated records, left
+   unedited; their command lines won't replay verbatim (accepted — we
+   don't re-run historical merge sequences).
+3. **Bash sibling brought to parity.** `run_review.sh` is updated to the
+   DeepSeek-only shape (provenance footer included), closing the ADR 0011
+   §Follow-up "`gemini_review.sh` has NOT been updated to the cascade."
+4. **Provenance footer retained** (Decision #3) — now always `deepseek`.
+5. **Local key handling.** The key lives in `scripts/review_keys.local.*`
+   (gitignored, auto-sourced by the script) — never committed, never in
+   the tracked script, so the `git-secrets` hook stays clean.
+
+**Consequences.**
+
+- **Cascade resilience is given up.** A DeepSeek outage/quota now blocks
+  the review loop — the exact failure ADR 0011 was created to prevent.
+  Accepted as a key-management simplification (one key, not four);
+  re-adding providers is a ~5-line `$providers` edit + env var, and the
+  full cascade is recoverable from git history.
+- **North star #1 ($0) caveat.** The cascade was all free-tier; DeepSeek's
+  direct API is paid-per-token (~fractions of a cent per review packet). A
+  second small, knowing exception to literal-$0 in the spirit of ADR 0013
+  — flagged for the record; PO owns the DeepSeek billing.
+- **The name no longer lies** — `run_review` is scope-accurate.
+
+**References.** Operationally supersedes the cascade in this ADR's
+Decision; updates ADR 0001's filename premise. Implementation:
+`scripts/run_review.{ps1,sh}`, `scripts/review_keys.local.ps1` (gitignored).
+DEV_NORMS §4/§7 + `context/dev_workflow.md` updated to the new name in the
+same commit.
