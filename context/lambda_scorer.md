@@ -14,7 +14,7 @@ Hot-path Lambda. One invocation per MQTT message via IoT Rule. Reads recent feat
 ## Interfaces (in / out)
 - **In:** IoT Rule event envelope wrapping the telemetry JSON (`_interfaces.md §Telemetry payload`). The handler treats `event` as the raw telemetry dict — matches the default IoT Rule SQL `SELECT * FROM 'factory/pumps/+/telemetry'`. If a future rule wraps the payload, only `_parse_event` needs updating.
 - **Out (DynamoDB):** reading row `{pump_id, sk=<ts>, vibration_amp, bearing_temp, motor_current, rpm, score}` + STATE row overwrite `{pump_id, sk="STATE", latest_ts, latest_score, latest_psi, alert_flag[, last_alert_sent_at]}` per ADR 0010 + ADR 0012. One `GetItem` on the STATE row per invocation (edge-trigger input).
-- **Out (SNS):** alert payload per `_interfaces.md §SNS alert payload`, published only on the False → True `alert_flag` flip (ADR 0012). Thresholds: `max(psi) > 0.25` OR `score > 0.7`.
+- **Out (SNS):** alert payload per `_interfaces.md §SNS alert payload`, published only on the False → True `alert_flag` flip (ADR 0012). Thresholds: `shared.drift.psi_alert_should_fire(window, psi) OR score > 0.7` — the PSI side is the shared composite (warmup floor `PSI_MIN_SAMPLES = 150` AND threshold `PSI_SIGNIFICANT_THRESHOLD = 0.25`, ADR 0017 §1); `score > 0.7` ungated.
 - **Shared logic:** `shared.features.extract_features`, `shared.score.score`, `shared.drift.load_reference`, `shared.drift.compute_psi` imported as peers (ADR 0005). Four structural-parity tests under `lambda_scorer/tests/test_handler.py::test_structural_parity_*` pin the load paths.
 
 ## Resource sizing
@@ -31,7 +31,7 @@ Hot-path Lambda. One invocation per MQTT message via IoT Rule. Reads recent feat
 
 ## Open questions
 - ~~Cold-start latency (measure post-deploy)~~ — **MEASURED 2026-06-07:** Init ~4.76–4.83 s, warm ~43 ms, 272 MB / 512 MB peak (two cold containers from the 15-way first-publish fan-out). Init exceeds the <2 s aspirational target but sits well inside the 10 s timeout; the hot path is async (IoT→Lambda, no user waiting) so only the first 1–2 invocations of a fan-out pay it. ADR 0006 §Q4's pre-authorized S3-cold-load fallback is therefore not triggered — recorded as informed-by-data; reopen only if a change pushes Init toward the timeout.
-- **PSI warmup alert storm (NEW, 2026-06-07) — needs its own parity-aware brief.** On a `healthy` fleet, 9/14 pumps fired `alert_flag: true` within minute 1: max-PSI > 0.25 on sub-minute sample windows (scores all ≤0.02, far below the 0.7 threshold). Edge-triggered SNS fired fleet-wide on PSI noise from tiny windows. Fix direction: a min-sample warmup gate before PSI alerts arm. Touches `shared.drift` / the drift surface → parity set (DEV_NORMS §5 Tier 2b); out of scope for the bookkeeping session that recorded it.
+- ~~**PSI warmup alert storm (2026-06-07).**~~ **CLOSED 2026-06-10 by ADR 0017.** The storm (9/14 healthy pumps firing `alert_flag: true` within minute 1 — max-PSI > 0.25 on sub-minute windows; scores all ≤ 0.02) is fixed by a min-sample warmup gate: `psi_breach = psi_is_armed(window) and max(psi) > 0.25`, where `psi_is_armed` + `PSI_MIN_SAMPLES = 150` (5 min) live in `shared.drift` (parity-correct single source; binds the future fleet-PSI Lambda). `score > 0.7` stays ungated (the storm was PSI-only). `compute_psi` is unchanged and `latest_psi` is still written on cold windows, so the dashboard shows PSI warming up — only the alert is gated.
 
 ## Related ADRs
 - ADR 0005 — parity boundary (`shared/{features,score,drift}`). Four structural-parity tests in `lambda_scorer/tests/test_handler.py` enforce (`compute_psi` guard added by the PSI follow-on).
@@ -41,3 +41,4 @@ Hot-path Lambda. One invocation per MQTT message via IoT Rule. Reads recent feat
 - ADR 0009 — PSI surface = 4 raw features. `latest_psi` is a 4-key Map; pinned by `test_psi_surface_pinned_at_four_keys`.
 - ADR 0010 — DynamoDB schema (load-bearing schema decision). The PSI follow-on exercised the pre-authorized STATE-row extension + the Limit=1800 forward commitment.
 - ADR 0012 — edge-triggered SNS alerts + two-attribute alert state (this component's alert-path decision).
+- ADR 0017 — PSI warmup gate. `psi_is_armed(window)` + `PSI_MIN_SAMPLES = 150` from `shared.drift` gate the PSI side of `alert_flag` at the arming site; `score > 0.7` ungated. Closes the 2026-06-07 warmup-storm open item. Pinned by `test_structural_parity_psi_is_armed_loads_from_shared` + `test_psi_alert_gated_below_warmup` / `test_psi_alert_arms_when_warm`.

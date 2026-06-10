@@ -57,9 +57,14 @@ start with year digits; "STATE" starts with S).
 Alerting (ADR 0012 — edge-trigger + two-attribute alert state):
 
 - ``alert_flag`` on the STATE row is the CURRENT-invocation breach
-  state: ``max(psi.values()) > 0.25 OR score > 0.7`` per
-  ``_interfaces.md §SNS alert payload``. Overwritten every
-  invocation; the dashboards adapter reads it to light a panel red.
+  state: ``(psi_is_armed(window) AND max(psi.values()) > 0.25) OR
+  score > 0.7`` per ``_interfaces.md §SNS alert payload`` + the
+  ADR 0017 warmup gate. The PSI side only arms once the window holds
+  ``PSI_MIN_SAMPLES`` (5 min at the 2 s tick); a sub-warmup window's
+  max-PSI > 0.25 is a small-sample binning artifact, not drift
+  (2026-06-07 cold-start storm). ``score > 0.7`` is ungated.
+  Overwritten every invocation; the dashboards adapter reads it to
+  light a panel red.
 - ``last_alert_sent_at`` records the ``ts`` of the last SNS publish.
   Carried forward verbatim on non-publishing invocations; absent
   until the pump's first publish.
@@ -122,7 +127,13 @@ from typing import Any, Mapping
 import boto3
 from boto3.dynamodb.conditions import Key
 
-from shared.drift import compute_psi, load_reference
+from shared.drift import (
+    PSI_SIGNIFICANT_THRESHOLD,
+    compute_psi,
+    load_reference,
+    psi_alert_should_fire,
+    psi_is_armed,
+)
 from shared.features import RAW_SIGNAL_FIELDS, extract_features
 from shared.score import score as score_fn
 
@@ -173,8 +184,11 @@ PSI_WINDOW_SAMPLES: int = 1800
 
 # Alert thresholds per ``_interfaces.md §SNS alert payload`` and
 # §PSI parameters: PSI > 0.25 is "significant shift"; score > 0.7 is
-# the high-failure-probability line.
-PSI_ALERT_THRESHOLD: float = 0.25
+# the high-failure-probability line. The PSI threshold's source of
+# truth is ``shared.drift.PSI_SIGNIFICANT_THRESHOLD`` (ADR 0017 §1 --
+# colocated with the warmup gate so alert sites can't diverge); this
+# module-level alias preserves the existing name for readers/tests.
+PSI_ALERT_THRESHOLD: float = PSI_SIGNIFICANT_THRESHOLD
 SCORE_ALERT_THRESHOLD: float = 0.7
 
 # Reserved sort-key value for the per-pump STATE row. ISO-8601
@@ -321,8 +335,10 @@ def handler(event: Mapping[str, Any], context: Any = None) -> dict[str, Any]:
     # items and the window has just the new reading — extract_features
     # tolerates a 1-element window (rolling stats degenerate to "the
     # value itself, std=0") and compute_psi tolerates it too (one bin
-    # holds all mass; with Laplace α=1.0 and an ~equal-frequency
-    # 10-bin reference the result stays under the warning band).
+    # holds all mass). On a cold window max-PSI can sit ABOVE the 0.25
+    # band (the 2026-06-07 storm), but the ADR 0017 warmup gate
+    # (psi_is_armed below) is what prevents that from arming an alert
+    # — not the magnitude of the value here.
     window.append({name: float(telemetry[name]) for name in RAW_SIGNAL_FIELDS})
     window = window[-PSI_WINDOW_SAMPLES:]
 
@@ -339,7 +355,25 @@ def handler(event: Mapping[str, Any], context: Any = None) -> dict[str, Any]:
     # module docstring.
     psi = compute_psi(window, reference=REFERENCE)
 
-    psi_breach = max(psi.values()) > PSI_ALERT_THRESHOLD
+    # Warmup gate (ADR 0017): a PSI breach may ARM an alert only once the
+    # window holds >= PSI_MIN_SAMPLES (5 min at the 2 s tick). On a
+    # sub-warmup window, max-PSI > 0.25 is a small-sample binning artifact,
+    # not drift -- the 2026-06-07 first-live-apply storm fired 9/14 healthy
+    # pumps within minute 1 (scores all <= 0.02). The warmup gate AND the
+    # significant-shift threshold are colocated in
+    # ``shared.drift.psi_alert_should_fire`` so the future fleet-PSI Lambda
+    # can't diverge on either (ADR 0017 §1; DeepSeek review 2026-06-10).
+    # compute_psi still ran and ``latest_psi`` is still written to the
+    # STATE row below, so the dashboard shows PSI warming up; only the
+    # ALERT is gated.
+    psi_breach = psi_alert_should_fire(window, psi)
+    # score_breach is intentionally NOT warmup-gated (ADR 0017 §3): a score
+    # is a per-sample model output, not a distributional statistic that
+    # needs bin population, so a high P(failure) even on a short window is a
+    # legitimate signal we want surfaced -- and the observed storm was
+    # PSI-only. The model's out-of-distribution behaviour on tiny windows
+    # is a model-surface concern (ADR 0006 / context/model.md), monitored
+    # post-deploy rather than papered over with a second gate here.
     score_breach = score_value > SCORE_ALERT_THRESHOLD
     alert_flag = psi_breach or score_breach
 

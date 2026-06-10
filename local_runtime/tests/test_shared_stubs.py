@@ -43,6 +43,8 @@ What this file pins for the live drift implementation:
   the significant band > 0.25 in the expected magnitudes.
 - Adjacent-equal bin_edges (the model session's nextafter-nudge case
   for near-constant features) do not produce div-by-zero.
+- ``psi_is_armed(window)`` arms at exactly ``PSI_MIN_SAMPLES`` (the
+  ADR 0017 warmup boundary; alert-gating predicate, not a PSI value).
 
 The PSI-value tests below are **golden tests** -- the magnitudes are
 analytically derived from the formula (PLAN.md s2.7 + Laplace
@@ -60,7 +62,13 @@ import math
 
 import pytest
 
-from shared.drift import compute_psi
+from shared.drift import (
+    PSI_MIN_SAMPLES,
+    PSI_SIGNIFICANT_THRESHOLD,
+    compute_psi,
+    psi_alert_should_fire,
+    psi_is_armed,
+)
 from shared.features import FEATURE_NAMES, PSI_FEATURE_NAMES
 from shared.score import score
 
@@ -272,3 +280,44 @@ def test_compute_psi_constant_bin_edges_no_div_by_zero():
             f"{name}: PSI is not finite ({psi[name]!r}) -- "
             "zero-width bin produced div-by-zero or log(0)"
         )
+
+
+def test_psi_is_armed_boundary():
+    """ADR 0017 warmup predicate arms at exactly ``PSI_MIN_SAMPLES``.
+
+    The single shared definition of "this window is warm enough to
+    trust a PSI breach" (consumed by the lambda_scorer alert-arming
+    site; local mode has no alert site). Pinned here -- numpy-free, no
+    reference needed -- so the boundary can't move without updating
+    ADR 0017. The lambda_scorer structural-parity test pins that the
+    handler loads THIS function, not a vendored fork.
+    """
+    assert PSI_MIN_SAMPLES == 150
+    assert psi_is_armed([0] * PSI_MIN_SAMPLES) is True
+    assert psi_is_armed([0] * (PSI_MIN_SAMPLES - 1)) is False
+    assert psi_is_armed([]) is False
+    # Only length is consulted; contents are irrelevant to arming.
+    assert psi_is_armed(range(PSI_MIN_SAMPLES)) is True
+
+
+def test_psi_alert_should_fire_composite():
+    """ADR 0017 §1 (DeepSeek-hardened): the shared composite encodes
+    BOTH the warmup gate and the significant-shift threshold, so every
+    alert site imports one decision rather than re-assembling it. Warm +
+    breach -> True; warm + stable -> False; cold + breach -> False;
+    empty psi -> False; threshold overridable.
+    """
+    breach = {"vibration_amp": 0.40, "bearing_temp": 0.02,
+              "motor_current": 0.01, "rpm": 0.03}
+    stable = {"vibration_amp": 0.02, "bearing_temp": 0.01,
+              "motor_current": 0.03, "rpm": 0.02}
+    warm = [0] * PSI_MIN_SAMPLES
+    cold = [0] * (PSI_MIN_SAMPLES - 1)
+
+    assert PSI_SIGNIFICANT_THRESHOLD == 0.25
+    assert psi_alert_should_fire(warm, breach) is True
+    assert psi_alert_should_fire(warm, stable) is False   # warm but < 0.25
+    assert psi_alert_should_fire(cold, breach) is False    # breaching but cold
+    assert psi_alert_should_fire([], breach) is False      # empty window = cold
+    assert psi_alert_should_fire(warm, {}) is False        # no PSI surface
+    assert psi_alert_should_fire(warm, breach, threshold=0.5) is False

@@ -75,7 +75,7 @@ from unittest import mock
 import pytest
 from boto3.dynamodb.conditions import Key
 
-from shared.drift import DriftError
+from shared.drift import DriftError, PSI_MIN_SAMPLES
 from shared.features import PSI_FEATURE_NAMES
 
 
@@ -243,6 +243,46 @@ def test_structural_parity_compute_psi_loads_from_shared():
         f"Loaded from: {func_file}; expected under: {shared_dir}"
     )
 
+
+
+def test_structural_parity_psi_is_armed_loads_from_shared():
+    """``lambda_scorer.handler.psi_is_armed`` must resolve to
+    ``shared/drift.py``. Fifth structural-parity guard (ADR 0017): the
+    warmup threshold + predicate are the SINGLE shared definition so
+    the per-pump scorer and the future fleet-PSI Lambda cannot diverge
+    on the arming boundary (north star #6). A vendored fork in this
+    directory fails loudly. Mirrors the compute_psi guard above.
+    """
+    import lambda_scorer.handler as handler_mod
+
+    func_file = Path(inspect.getfile(handler_mod.psi_is_armed)).resolve()
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    shared_dir = (repo_root / "shared").resolve()
+
+    assert shared_dir in func_file.parents, (
+        f"psi_is_armed is not loaded from shared/! "
+        f"Loaded from: {func_file}; expected under: {shared_dir}"
+    )
+
+
+def test_structural_parity_psi_alert_should_fire_loads_from_shared():
+    """``lambda_scorer.handler.psi_alert_should_fire`` must resolve to
+    ``shared/drift.py``. Sixth structural-parity guard (ADR 0017 §1,
+    DeepSeek-hardened): the FULL PSI alert decision -- warmup gate AND
+    the 0.25 threshold -- is the single shared definition, so the
+    per-pump scorer and the future fleet-PSI Lambda cannot diverge on
+    the boundary OR the threshold (north star #6).
+    """
+    import lambda_scorer.handler as handler_mod
+
+    func_file = Path(inspect.getfile(handler_mod.psi_alert_should_fire)).resolve()
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    shared_dir = (repo_root / "shared").resolve()
+
+    assert shared_dir in func_file.parents, (
+        f"psi_alert_should_fire is not loaded from shared/! "
+        f"Loaded from: {func_file}; expected under: {shared_dir}"
+    )
 
 # --- Cold-start tests ---
 
@@ -534,7 +574,7 @@ def test_sns_publish_on_threshold_breach(fresh_handler):
     sns_stub = mock.MagicMock()
     handler_mod._SNS = sns_stub
 
-    _seed_readings(table, 10, values=_EXTREME)
+    _seed_readings(table, PSI_MIN_SAMPLES, values=_EXTREME)
     ts = "2026-06-02T14:32:01.123Z"
     result = handler_mod.handler(_telemetry(ts=ts, **_EXTREME))
 
@@ -576,6 +616,89 @@ def test_sns_no_publish_when_healthy(fresh_handler):
     assert "last_alert_sent_at" not in state
 
 
+def test_psi_alert_gated_below_warmup(fresh_handler):
+    """ADR 0017 warmup gate: a sub-warmup window whose PSI breaches
+    0.25 must NOT arm an alert. The 2026-06-07 storm had scores
+    <= 0.02, so neutralising the score route isolates the PSI gate:
+    with fewer than ``PSI_MIN_SAMPLES`` readings the breaching PSI is a
+    small-sample artifact and ``alert_flag`` stays False. Crucially
+    ``latest_psi`` is STILL written and STILL breaches -- the gate
+    suppresses the alert, not the computation, so the dashboard keeps
+    seeing PSI warm up.
+    """
+    handler_mod, table = fresh_handler
+    sns_stub = mock.MagicMock()
+    handler_mod._SNS = sns_stub
+    handler_mod.score_fn = lambda features: 0.0  # isolate the PSI route
+
+    # Far below the 150-sample warmup floor; all-extreme -> PSI >> 0.25.
+    _seed_readings(table, 10, values=_EXTREME)
+    result = handler_mod.handler(_telemetry(ts="2026-06-02T14:32:01.123Z", **_EXTREME))
+
+    assert result["alert_flag"] is False
+    sns_stub.publish.assert_not_called()
+
+    state = _get_state(table)
+    assert state["alert_flag"] is False
+    assert "last_alert_sent_at" not in state
+    # The PSI WAS computed and stored, and it DOES breach -- proving the
+    # gate is on the alert, not the value.
+    max_psi = max(float(v) for v in state["latest_psi"].values())
+    assert max_psi > handler_mod.PSI_ALERT_THRESHOLD
+
+
+def test_psi_alert_arms_when_warm(fresh_handler):
+    """ADR 0017 warmup gate, the other edge: once the window reaches
+    ``PSI_MIN_SAMPLES`` a genuine PSI breach DOES arm. Score route
+    neutralised so the publish is unambiguously PSI-driven
+    (``alert_type == "psi_breach"``).
+    """
+    handler_mod, table = fresh_handler
+    sns_stub = mock.MagicMock()
+    handler_mod._SNS = sns_stub
+    handler_mod.score_fn = lambda features: 0.0  # isolate the PSI route
+
+    # PSI_MIN_SAMPLES seeded + 1 appended in-handler = warm window.
+    _seed_readings(table, PSI_MIN_SAMPLES, values=_EXTREME)
+    ts = "2026-06-02T14:32:01.123Z"
+    result = handler_mod.handler(_telemetry(ts=ts, **_EXTREME))
+
+    assert result["alert_flag"] is True
+    assert sns_stub.publish.call_count == 1
+    payload = json.loads(sns_stub.publish.call_args.kwargs["Message"])
+    assert payload["alert_type"] == "psi_breach"
+    assert max(payload["psi"].values()) > handler_mod.PSI_ALERT_THRESHOLD
+    # §5 (DeepSeek): the gate is on the alert, not the value -- latest_psi
+    # is still written to the STATE row even when the alert DOES fire.
+    state = _get_state(table)
+    assert max(float(v) for v in state["latest_psi"].values()) > handler_mod.PSI_ALERT_THRESHOLD
+
+
+def test_score_alert_not_gated_by_warmup(fresh_handler):
+    """ADR 0017 §3: the score path is deliberately NOT warmup-gated. A
+    cold window (far below ``PSI_MIN_SAMPLES``) whose extreme readings
+    drive score > 0.7 DOES arm an alert -- ``alert_type`` is
+    "high_failure_prob" because the PSI side is gated off on the cold
+    window. Locks the asymmetry so a future "gate score too" change has
+    to confront this test (DeepSeek review 2026-06-10).
+    """
+    handler_mod, table = fresh_handler
+    sns_stub = mock.MagicMock()
+    handler_mod._SNS = sns_stub
+
+    # Cold window (10 < PSI_MIN_SAMPLES) of extreme readings: the model
+    # scores them high (~0.82, module docstring §PSI breach mechanics)
+    # while psi_is_armed(window) is False -> PSI side gated off, score
+    # side fires.
+    _seed_readings(table, 10, values=_EXTREME)
+    result = handler_mod.handler(_telemetry(ts="2026-06-02T14:32:01.123Z", **_EXTREME))
+
+    assert result["alert_flag"] is True
+    assert sns_stub.publish.call_count == 1
+    payload = json.loads(sns_stub.publish.call_args.kwargs["Message"])
+    assert payload["alert_type"] == "high_failure_prob"
+
+
 def test_sns_no_republish_when_still_breached(fresh_handler):
     """Edge-trigger semantics (ADR 0012): a breach that persists
     across consecutive invocations publishes on the FIRST breaching
@@ -587,7 +710,7 @@ def test_sns_no_republish_when_still_breached(fresh_handler):
     sns_stub = mock.MagicMock()
     handler_mod._SNS = sns_stub
 
-    _seed_readings(table, 10, values=_EXTREME)
+    _seed_readings(table, PSI_MIN_SAMPLES, values=_EXTREME)
     ts_first = "2026-06-02T14:32:01.123Z"
     ts_second = "2026-06-02T14:32:03.123Z"
 
@@ -626,7 +749,7 @@ def test_sns_publish_failure_is_loud_and_at_most_once(fresh_handler):
     sns_stub.publish.side_effect = RuntimeError("SNS unavailable")
     handler_mod._SNS = sns_stub
 
-    _seed_readings(table, 10, values=_EXTREME)
+    _seed_readings(table, PSI_MIN_SAMPLES, values=_EXTREME)
     ts = "2026-06-02T14:32:01.123Z"
 
     # (a) Loud: the publish failure propagates as an invocation error.

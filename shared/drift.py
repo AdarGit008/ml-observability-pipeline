@@ -80,7 +80,7 @@ import json
 import math
 import pickle
 from pathlib import Path
-from typing import Iterable, Mapping, Optional
+from typing import Iterable, Mapping, Optional, Sized
 
 import numpy as np
 
@@ -100,6 +100,33 @@ _DEFAULT_MODEL_PATH: Path = Path(__file__).resolve().parent.parent / "model" / "
 # bin against a 10%-expected bin contributes ~ 0.52 to PSI --
 # meaningful but not alarmist. See ADR 0007 for alternatives.
 LAPLACE_ALPHA: float = 1.0
+
+
+# Minimum window depth before PSI is allowed to ARM an alert (ADR 0017).
+# PSI on a sub-warmup window is a small-sample artifact, not drift: with
+# 10 equal-frequency reference bins and Laplace alpha = 1.0 (ADR 0007),
+# a handful of readings concentrate all actual mass in one or two bins
+# and the add-alpha prior dominates the ratio -- pushing max-PSI past
+# 0.25 even on a HEALTHY fleet (observed 2026-06-07 first live apply:
+# 9 of 14 pumps fired alert_flag within minute 1; scores all <= 0.02,
+# far below the 0.7 line). 150 samples = the 5-minute scoring window
+# (lambda_scorer.handler.WINDOW_SAMPLES at the 2 s tick) -- ~15
+# observations per bin, so the Laplace prior becomes a ~6% correction
+# rather than the dominant term. On a FULL window a healthy demo fleet
+# already reads STABLE (ADR 0008 operational reference), so this gate
+# suppresses ONLY the cold-start storm and never real drift. Consumed
+# by ``psi_is_armed``; see ADR 0017 for the threshold derivation.
+PSI_MIN_SAMPLES: int = 150
+
+
+# PSI "significant shift" threshold (ADR 0007 bands: <0.10 stable /
+# 0.10-0.25 warning / >0.25 significant). Lives here, in the drift
+# surface, so the alert THRESHOLD travels with the warmup gate as a
+# single shared definition -- a future fleet-PSI Lambda imports one
+# function (``psi_alert_should_fire``) and cannot diverge on either the
+# boundary or the threshold (DeepSeek review 2026-06-10 §1; north star
+# #6). ``lambda_scorer.handler.PSI_ALERT_THRESHOLD`` aliases this.
+PSI_SIGNIFICANT_THRESHOLD: float = 0.25
 
 
 class DriftError(RuntimeError):
@@ -256,6 +283,81 @@ def _check_model_version_match(ref: dict, model_path: Path) -> None:
             f"operational_reference_distribution.json model_version={ref_version!r}. "
             "Re-run `python -m model.train` so both artifacts share a version."
         )
+
+
+def psi_is_armed(window: Sized) -> bool:
+    """Return True when ``window`` holds enough samples for a PSI breach
+    to ARM an alert (``len(window) >= PSI_MIN_SAMPLES``), per ADR 0017.
+
+    Pure, dependency-free predicate -- the single shared definition of
+    "this window is warm enough to trust a PSI breach." This is the
+    parity-correct home for the warmup threshold (ADR 0005): the
+    per-pump ``lambda_scorer`` hot path consults it before arming an
+    SNS alert, and the future fleet-PSI EventBridge Lambda will consult
+    the SAME constant so the two AWS alert sites cannot diverge on the
+    warmup boundary (north star #6 -- local/AWS divergence is a bug or
+    an ADR). ``local_runtime`` has no alert site -- it writes PSI to
+    InfluxDB for visualisation only -- so it does not call this; there
+    is therefore no local/AWS PSI-value divergence to reconcile.
+
+    The gate is on the ALERT, not the computation. ``compute_psi``
+    still returns real PSI for every window, cold or warm, so the
+    dashboard shows the metric warming up; only whether a breach is
+    allowed to page someone is gated. Decoupling "PSI is computed"
+    from "PSI is trustworthy enough to alert" is the whole point
+    (ADR 0017 Decision).
+
+    Args:
+        window: the same PSI window the caller passes to
+            ``compute_psi`` (any sized iterable -- the lambda hot path
+            passes the DynamoDB-reconstructed reading list). Only its
+            length is consulted; contents are irrelevant to arming.
+
+    Returns:
+        ``True`` iff ``len(window) >= PSI_MIN_SAMPLES``.
+    """
+    return len(window) >= PSI_MIN_SAMPLES
+
+
+def psi_alert_should_fire(
+    window: Sized,
+    psi: Mapping[str, float],
+    threshold: float = PSI_SIGNIFICANT_THRESHOLD,
+) -> bool:
+    """Composite PSI alert-arming decision: window warm AND breaching.
+
+    The single shared definition of "should a PSI breach arm an alert."
+    It encodes BOTH the warmup gate (``psi_is_armed``) AND the
+    significant-shift threshold, so every alert site -- ``lambda_scorer``
+    today, the future fleet-PSI EventBridge Lambda tomorrow -- imports
+    ONE function and cannot diverge on either the warmup boundary or the
+    threshold (ADR 0017; DeepSeek review 2026-06-10 §1 hardened this
+    from a bare predicate to the full decision). Keeping just
+    ``PSI_MIN_SAMPLES`` shared but the threshold in ``lambda_scorer``
+    would have left a future Lambda free to pick a different threshold
+    or skip the gate -- a parity hole closed by colocating the whole
+    decision (north star #6).
+
+    Pure and side-effect free. Gates the ALERT, not the computation:
+    ``compute_psi`` still runs for every window and ``latest_psi`` is
+    still written, so the dashboard shows PSI warming up regardless of
+    this return value.
+
+    Args:
+        window: the PSI window the caller passed to ``compute_psi``
+            (any sized iterable). Only its length is consulted.
+        psi: the per-feature PSI dict ``compute_psi`` returned.
+        threshold: significant-shift cutoff; defaults to
+            ``PSI_SIGNIFICANT_THRESHOLD`` (0.25, ADR 0007).
+
+    Returns:
+        ``True`` iff the window is warm (``psi_is_armed``) AND the max
+        per-feature PSI exceeds ``threshold``. An empty ``psi`` dict
+        returns ``False`` (no surface to breach).
+    """
+    if not psi:
+        return False
+    return psi_is_armed(window) and max(psi.values()) > threshold
 
 
 def compute_psi(
