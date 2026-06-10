@@ -1,18 +1,17 @@
 <#
 .SYNOPSIS
-  Run a review packet through an LLM API and write the response.
+  Run a review packet through the DeepSeek API and write the response.
 
 .DESCRIPTION
-  Reads review_packets/<date>-<slug>.md, POSTs the contents to a model
-  provider's generate endpoint, writes the response to
+  Reads review_packets/<date>-<slug>.md, POSTs the contents to DeepSeek's
+  OpenAI-compatible chat-completions endpoint, and writes the response to
   review_responses/<date>-<slug>.md as UTF-8.
 
-  Default: cascades through providers gemini -> openrouter -> groq ->
-  cerebras, picking the first one whose API key env var is set and
-  whose call succeeds. This protects against Gemini being out of
-  capacity (503) or out of credits (4xx). Each provider in the chain
-  uses its own free-tier-friendly default model unless overridden via
-  -Model (which applies only to the first provider tried).
+  Single provider: DeepSeek (api.deepseek.com), reading the key from
+  DEEPSEEK_API_KEY. Trimmed to DeepSeek-only 2026-06-10 (PO call) after
+  the gemini/openrouter/groq/cerebras keys were rotated; the prior
+  multi-provider cascade (ADR 0011) is recoverable from git history.
+  -Model overrides the default model.
 
   Bypasses the Gemini CLI deliberately. See docs/adr/0001-direct-gemini-api-for-reviews.md.
 
@@ -21,45 +20,33 @@
   review_packets/2026-05-24-simulator-pump.md, pass "simulator-pump".
 
 .PARAMETER Model
-  Model identifier to use for the FIRST provider tried. Subsequent
-  fallback providers use their own defaults (mixing model names
-  across providers doesn't work -- gemini-pro-latest is invalid for
-  Groq, llama-3.3-70b is invalid for Gemini). If you want a specific
-  model from a specific fallback, pair this with -Provider.
+  Model identifier. Defaults to deepseek-reasoner (R1). Pass deepseek-chat
+  for DeepSeek V3.
 
 .PARAMETER Date
   Date prefix of the packet file. When omitted, the script globs
   review_packets/*-<slug>.md and picks the newest match.
 
 .PARAMETER Provider
-  auto (default)   : cascade gemini -> openrouter -> groq -> cerebras
-                     (skipping providers without an API key env var)
-  gemini           : Google Gemini only (no cascade)
-  openrouter       : OpenRouter only
-  groq             : Groq only
-  cerebras         : Cerebras only
+  auto (default)   : DeepSeek (the only configured provider)
+  deepseek         : DeepSeek explicitly
 
 .PARAMETER DumpBody
-  Dump each provider's outbound request body to
+  Dump the outbound request body to
   review_responses/<date>-<slug>.<provider>.request.json for debugging.
 
 .EXAMPLE
-  .\scripts\gemini_review.ps1 -Slug simulator-pump
-  # tries gemini, falls back through openrouter/groq/cerebras on failure
+  .\scripts\run_review.ps1 -Slug simulator-pump
+  # runs the DeepSeek reviewer (deepseek-reasoner)
 
 .EXAMPLE
-  .\scripts\gemini_review.ps1 -Slug simulator-pump -Provider groq
-
-.EXAMPLE
-  .\scripts\gemini_review.ps1 -Slug simulator-pump -Model gemini-2.5-flash
-  # tries gemini with the explicit model; falls back if it fails
+  .\scripts\run_review.ps1 -Slug simulator-pump -Model deepseek-chat
+  # use DeepSeek V3 (chat) instead of the R1 reasoner default
 
 .NOTES
-  Required env vars per provider (set whichever you have):
-    GEMINI_API_KEY      https://aistudio.google.com/apikey
-    OPENROUTER_API_KEY  https://openrouter.ai/keys
-    GROQ_API_KEY        https://console.groq.com/keys
-    CEREBRAS_API_KEY    https://cloud.cerebras.ai/?tab=api-keys
+  Required env var:
+    DEEPSEEK_API_KEY    https://platform.deepseek.com/api_keys
+  (Set locally via scripts/review_keys.local.ps1 -- gitignored.)
 #>
 
 [CmdletBinding()]
@@ -67,28 +54,30 @@ param(
   [Parameter(Mandatory = $true)][string]$Slug,
   [string]$Model,
   [string]$Date,
-  [ValidateSet("auto", "gemini", "openrouter", "groq", "cerebras")]
+  [ValidateSet("auto", "deepseek")]
   [string]$Provider = "auto",
   [switch]$DumpBody
 )
 
 $ErrorActionPreference = "Stop"
 
+# --- Local API key (gitignored; not committed) ---
+# Auto-source the per-developer reviewer key if present so the provider
+# below sees DEEPSEEK_API_KEY without touching the shell profile.
+$localKeys = Join-Path $PSScriptRoot "review_keys.local.ps1"
+if (Test-Path $localKeys) { . $localKeys }
+
 # --- Provider config map ---
 #
-# Each entry carries the free-tier-friendly default model and the env
-# var the script reads the API key from. The OpenAI-compatible
-# providers (openrouter/groq/cerebras) share one Invoke-OpenAICompat
-# helper; Gemini has its own native shape.
+# Single provider: DeepSeek (OpenAI-compatible chat completions). Carries
+# the default model and the env var the script reads the API key from.
+# Served by the Invoke-OpenAICompat helper.
 
 $providers = [ordered]@{
-  gemini     = @{ DefaultModel = "gemini-pro-latest"; EnvVar = "GEMINI_API_KEY"; Endpoint = $null }
-  openrouter = @{ DefaultModel = "deepseek/deepseek-r1:free"; EnvVar = "OPENROUTER_API_KEY"; Endpoint = "https://openrouter.ai/api/v1/chat/completions" }
-  groq       = @{ DefaultModel = "llama-3.3-70b-versatile"; EnvVar = "GROQ_API_KEY"; Endpoint = "https://api.groq.com/openai/v1/chat/completions" }
-  cerebras   = @{ DefaultModel = "llama-3.3-70b"; EnvVar = "CEREBRAS_API_KEY"; Endpoint = "https://api.cerebras.ai/v1/chat/completions" }
+  deepseek = @{ DefaultModel = "deepseek-reasoner"; EnvVar = "DEEPSEEK_API_KEY"; Endpoint = "https://api.deepseek.com/chat/completions" }
 }
 
-# --- Packet auto-pick (unchanged from pre-cascade behavior) ---
+# --- Packet auto-pick ---
 
 if (-not $PSBoundParameters.ContainsKey("Date")) {
   $candidates = Get-ChildItem -Path "review_packets" -Filter "*-$Slug.md" -ErrorAction SilentlyContinue |
@@ -112,37 +101,10 @@ $prompt = [System.IO.File]::ReadAllText((Resolve-Path $packet).Path, [System.Tex
 
 Add-Type -AssemblyName System.Web
 
-# --- Provider invocation helpers ---
+# --- Provider invocation helper ---
 #
-# Each helper throws on failure (after printing the API's error body
-# to the console). The outer cascade catches and moves to the next
-# provider. Successful return: the response text as a [string].
-
-function Invoke-Gemini {
-  param([string]$Model, [string]$Key, [string]$Prompt, [string]$DumpPath)
-
-  $promptJson = [System.Web.HttpUtility]::JavaScriptStringEncode($Prompt, $true)
-  $body = '{"contents":[{"role":"user","parts":[{"text":' + $promptJson + '}]}]}'
-
-  if ($DumpPath) {
-    [System.IO.File]::WriteAllText($DumpPath, $body, [System.Text.UTF8Encoding]::new($false))
-    Write-Host "[gemini] request body dumped to $DumpPath ($($body.Length) chars)" -ForegroundColor DarkGray
-  }
-
-  $uri = "https://generativelanguage.googleapis.com/v1beta/models/${Model}:generateContent?key=$Key"
-  $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
-
-  try {
-    $r = Invoke-RestMethod -Method Post -Uri $uri -ContentType "application/json; charset=utf-8" -Body $bodyBytes
-  } catch {
-    Write-ApiError -ProviderName "gemini" -Uri ($uri -replace 'key=[^&]+','key=<redacted>') -Err $_
-    throw
-  }
-
-  $text = $r.candidates[0].content.parts[0].text
-  if (-not $text) { throw "[gemini] empty response. Raw: $($r | ConvertTo-Json -Depth 10)" }
-  return $text
-}
+# Throws on failure (after printing the API's error body to the console).
+# Successful return: the response text as a [string].
 
 function Invoke-OpenAICompat {
   param([string]$ProviderName, [string]$Endpoint, [string]$Model, [string]$Key, [string]$Prompt, [string]$DumpPath)
@@ -150,8 +112,7 @@ function Invoke-OpenAICompat {
   $promptJson = [System.Web.HttpUtility]::JavaScriptStringEncode($Prompt, $true)
   $modelJson = [System.Web.HttpUtility]::JavaScriptStringEncode($Model, $true)
   # OpenAI-compatible chat completions shape. temperature defaults are
-  # fine for review prompts; max_tokens unset = provider default
-  # (usually generous on free tiers).
+  # fine for review prompts; max_tokens unset = provider default.
   $body = '{"model":' + $modelJson + ',"messages":[{"role":"user","content":' + $promptJson + '}]}'
 
   if ($DumpPath) {
@@ -162,13 +123,6 @@ function Invoke-OpenAICompat {
   $headers = @{
     "Authorization" = "Bearer $Key"
     "Content-Type"  = "application/json; charset=utf-8"
-  }
-  # OpenRouter recommends an HTTP-Referer for free-tier rate-limit
-  # heuristics; the value doesn't have to resolve. Skipping it doesn't
-  # error but can lower priority.
-  if ($ProviderName -eq "openrouter") {
-    $headers["HTTP-Referer"] = "https://github.com/local-ml-obs-pipeline"
-    $headers["X-Title"]      = "ML Observability Pipeline review"
   }
 
   $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
@@ -208,7 +162,7 @@ function Write-ApiError {
   }
 }
 
-# --- Cascade ---
+# --- Run ---
 
 if ($Provider -eq "auto") {
   $chain = @($providers.Keys)
@@ -232,10 +186,7 @@ foreach ($p in $chain) {
     continue
   }
 
-  # -Model applies only to the FIRST provider tried (avoids the
-  # cross-provider model-name mismatch). Subsequent providers use
-  # their own free-tier defaults.
-  $effectiveModel = if ($Model -and $p -eq $chain[0]) { $Model } else { $cfg.DefaultModel }
+  $effectiveModel = if ($Model) { $Model } else { $cfg.DefaultModel }
 
   $dumpPath = if ($DumpBody) {
     Join-Path $dir "$Date-$Slug.$p.request.json"
@@ -244,23 +195,19 @@ foreach ($p in $chain) {
   Write-Host "[$p] trying model=$effectiveModel..." -ForegroundColor Cyan
 
   try {
-    if ($p -eq "gemini") {
-      $responseText = Invoke-Gemini -Model $effectiveModel -Key $key -Prompt $prompt -DumpPath $dumpPath
-    } else {
-      $responseText = Invoke-OpenAICompat -ProviderName $p -Endpoint $cfg.Endpoint -Model $effectiveModel -Key $key -Prompt $prompt -DumpPath $dumpPath
-    }
+    $responseText = Invoke-OpenAICompat -ProviderName $p -Endpoint $cfg.Endpoint -Model $effectiveModel -Key $key -Prompt $prompt -DumpPath $dumpPath
     $usedProvider = $p
     $usedModel = $effectiveModel
     break
   } catch {
-    Write-Host "[$p] failed; moving on to next provider in chain" -ForegroundColor Yellow
+    Write-Host "[$p] failed; moving on" -ForegroundColor Yellow
     continue
   }
 }
 
 if (-not $responseText) {
   $checked = ($chain | ForEach-Object { "$($_) ($($providers[$_].EnvVar))" }) -join ", "
-  Write-Error "All providers exhausted. Tried: $checked. Set at least one API key env var or wait for capacity."
+  Write-Error "All providers exhausted. Tried: $checked. Set DEEPSEEK_API_KEY or wait for capacity."
   exit 1
 }
 
