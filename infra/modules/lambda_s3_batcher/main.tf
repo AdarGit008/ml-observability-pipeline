@@ -37,9 +37,9 @@ data "archive_file" "dist" {
 # limit surprise on the next pyarrow bump). deploy/ sits outside the
 # Glue year=* projection paths; force_destroy sweeps it.
 resource "aws_s3_object" "code" {
-  bucket = var.bucket_name
-  key    = "deploy/${var.function_name}.zip"
-  source = data.archive_file.dist.output_path
+  bucket      = var.bucket_name
+  key         = "deploy/${var.function_name}.zip"
+  source      = data.archive_file.dist.output_path
   source_hash = data.archive_file.dist.output_md5 # multipart-safe (not etag): avoids phantom diff on >5MB zips (2026-06-07 live-apply lesson)
 }
 

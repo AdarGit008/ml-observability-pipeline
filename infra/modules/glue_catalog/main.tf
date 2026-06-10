@@ -35,20 +35,20 @@ resource "aws_glue_catalog_table" "readings" {
     # return EMPTY results, not errors; unfiltered queries enumerate
     # only projected partitions. Widen projection.year.range here if
     # the project outlives 2035.
-    "projection.enabled"            = "true"
-    "projection.year.type"          = "integer"
-    "projection.year.range"         = "2025,2035"
-    "projection.year.digits"        = "4"
-    "projection.month.type"         = "integer"
-    "projection.month.range"        = "1,12"
-    "projection.month.digits"       = "2"
-    "projection.day.type"           = "integer"
-    "projection.day.range"          = "1,31"
-    "projection.day.digits"         = "2"
-    "projection.hour.type"          = "integer"
-    "projection.hour.range"         = "0,23"
-    "projection.hour.digits"        = "2"
-    "storage.location.template"     = "s3://${var.bucket_name}/year=$${year}/month=$${month}/day=$${day}/hour=$${hour}/"
+    "projection.enabled"        = "true"
+    "projection.year.type"      = "integer"
+    "projection.year.range"     = "2025,2035"
+    "projection.year.digits"    = "4"
+    "projection.month.type"     = "integer"
+    "projection.month.range"    = "1,12"
+    "projection.month.digits"   = "2"
+    "projection.day.type"       = "integer"
+    "projection.day.range"      = "1,31"
+    "projection.day.digits"     = "2"
+    "projection.hour.type"      = "integer"
+    "projection.hour.range"     = "0,23"
+    "projection.hour.digits"    = "2"
+    "storage.location.template" = "s3://${var.bucket_name}/year=$${year}/month=$${month}/day=$${day}/hour=$${hour}/"
   }
 
   partition_keys {
@@ -83,8 +83,8 @@ resource "aws_glue_catalog_table" "readings" {
       type = "string"
     }
     columns {
-      name = "ts"
-      type = "string"
+      name    = "ts"
+      type    = "string"
       comment = "ISO-8601 UTC ms — identical to the DynamoDB sort key it came from"
     }
     columns {
@@ -104,8 +104,8 @@ resource "aws_glue_catalog_table" "readings" {
       type = "double"
     }
     columns {
-      name = "score"
-      type = "double"
+      name    = "score"
+      type    = "double"
       comment = "P(failure_48h) the scorer wrote with the reading (ADR 0010)"
     }
   }
