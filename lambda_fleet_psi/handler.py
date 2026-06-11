@@ -4,7 +4,7 @@ Design locked by ADR 0018. One invocation every 5 minutes (the
 EventBridge cadence; the event payload is unused — the table holds the
 state). Per invocation:
 
-1. For each pump ``P-01..P-NN`` (``FLEET_SIZE``), read the trailing
+1. For each pump ``P-00..P-(FLEET_SIZE-1)`` (``FLEET_SIZE``), read the trailing
    ``FLEET_WINDOW_SAMPLES`` reading rows from DynamoDB — the same
    ``Query(PK=pump_id, sk begins_with "2", ScanIndexForward=False)``
    the scorer uses (ADR 0010 §Access patterns), reversed to
@@ -59,7 +59,7 @@ per-pump scorer share one definition of "fleet drift is meaningful and
 breaching."
 
 The FLEET partition is isolated from the per-pump partitions: the
-scorer and batcher iterate ``P-01..P-NN`` and never touch ``"FLEET"``,
+scorer and batcher iterate ``P-00..P-(FLEET_SIZE-1)`` and never touch ``"FLEET"``,
 and the dashboards adapter's ``BatchGetItem`` reads the 15 pump STATE
 keys (a FLEET panel is a small follow-on adapter change — ADR 0018
 §Follow-ups). So this row adds a plant-level view without disturbing
@@ -73,7 +73,7 @@ Environment variables (read at cold start):
   (same fail-fast posture as the scorer, ADR 0012). The fleet reuses
   the scorer's alert topic; ``pump_id="FLEET"`` in the payload marks
   the scope.
-- ``FLEET_SIZE`` — pump count, expanded to ``P-01..P-NN``; 1..99
+- ``FLEET_SIZE`` — pump count, expanded to ``P-00..P-(FLEET_SIZE-1)``; 1..99
   validated (two-digit zero-padded pump-id format, ``_interfaces.md``).
 - ``AWS_REGION`` — defaults to ``eu-central-1`` (``_global.md`` #5).
 """
@@ -119,7 +119,7 @@ if not 1 <= FLEET_SIZE <= 99:
     )
 
 FLEET_PUMP_IDS: tuple[str, ...] = tuple(
-    f"P-{i:02d}" for i in range(1, FLEET_SIZE + 1)
+    f"P-{i:02d}" for i in range(FLEET_SIZE)
 )
 
 # Eager-load the operational reference (the 15-pump pooled HEALTHY

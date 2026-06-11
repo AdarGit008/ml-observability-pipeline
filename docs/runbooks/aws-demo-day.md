@@ -51,13 +51,14 @@ Teardown after EVERY demo, no exceptions.
 .\scripts\build_lambda.ps1      # stages .build/lambda_dist/
 .\scripts\build_adapter.ps1     # stages .build/adapter_dist/
 .\scripts\build_batcher.ps1     # stages .build/batcher_dist/
+.\scripts\build_fleet_psi.ps1   # stages .build/fleet_psi_dist/ (ADR 0018)
 cd infra
 terraform init                  # first time / after provider changes
 terraform apply                 # review the plan before yes
 ```
 
-All three builds MUST precede plan/apply (`archive_file` reads the
-staged trees). Apply provisions the IoT fleet AND writes the cert
+All FOUR builds MUST precede plan/apply (`archive_file`/`aws_s3_object`
+read the staged trees — incl. `fleet_psi_dist`, ADR 0018). Apply provisions the IoT fleet AND writes the cert
 material — `simulator/.secrets/AmazonRootCA1.pem` plus
 `P-NN/P-NN.cert.pem` + `P-NN.private.key` per pump (ADR 0016; this IS
 the "cert pull" step). Plan/apply needs reach to amazontrust.com for
@@ -78,6 +79,11 @@ fleet:
   ambient_celsius: 22.0
   base_seed: 0
 scenario: healthy          # or seasonal_drift | fleet_expansion | real_failure
+  # NB: with demo_mode: true, HEALTHY dwell compresses to ~60 ticks
+  # (simulator/config.py) — the fleet runs the full HEALTHY->FAILED arc
+  # in ~15 min. For a steady healthy baseline (healthy-quiet check) OR a
+  # clean seasonal_drift fleet demo, set demo_mode: false so pump
+  # auto-degradation does not contaminate the signal (2026-06-11 session).
 broker:
   target: aws-iot
   url: "<paste iot_endpoint here>"
@@ -147,6 +153,11 @@ are already on bash's PATH:
 ```bash
 ./scripts/aws_teardown.sh
 ```
+
+**Gotcha (2026-06-11):** invoking the `.sh` via `& "…bash.exe" -lc '…'`
+from PowerShell can swallow ALL stdout (observed twice). Prefer a native
+Git Bash terminal; or verify $0 with PowerShell-native `aws` absence
+checks (describe-table / list-functions / list-things / s3 ls / list-topics).
 
 Destroys the stack and sweeps for residue: hot path, cold path, AND
 the IoT fleet (Things `P-00`–`P-14`, the `pump-fleet-policy`, ACTIVE

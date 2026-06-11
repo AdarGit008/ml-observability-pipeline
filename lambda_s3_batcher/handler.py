@@ -37,7 +37,7 @@ Environment variables:
 - ``DDB_TABLE_NAME`` — hot-state table (default ``pump_hot_state``).
 - ``S3_BUCKET`` — archive bucket. REQUIRED; fail-fast at cold start
   (same posture as the scorer's ``SNS_TOPIC_ARN``, ADR 0012).
-- ``FLEET_SIZE`` — pump count, expanded to ``P-01..P-NN``; 1..99
+- ``FLEET_SIZE`` — pump count, expanded to ``P-00..P-(FLEET_SIZE-1)``; 1..99
   validated at cold start (pump-id format, ``_interfaces.md``).
 - ``SAFETY_LAG_SECONDS`` — late-arrival guard (default 5, ≥ 0).
 - ``DDB_ENDPOINT_URL`` / ``S3_ENDPOINT_URL`` — local-test affordances.
@@ -98,7 +98,7 @@ if SAFETY_LAG_SECONDS < 0:
     )
 
 FLEET_PUMP_IDS: tuple[str, ...] = tuple(
-    f"P-{i:02d}" for i in range(1, FLEET_SIZE + 1)
+    f"P-{i:02d}" for i in range(FLEET_SIZE)
 )
 
 _DDB_KWARGS: dict[str, Any] = {"region_name": AWS_REGION}

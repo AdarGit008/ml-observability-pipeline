@@ -109,7 +109,7 @@ Per invocation (PSI follow-on landed 2026-06-02):
 
 ## Fleet-PSI DynamoDB writes
 Per invocation (EventBridge `rate(5 minutes)`; ADR 0018, `lambda_fleet_psi`):
-- Per pump `P-01..P-NN`: `Query` the trailing 150-row window (`sk begins_with "2"`, `ScanIndexForward=False`) — same access pattern as the scorer; pooled across the fleet.
+- Per pump `P-00..P-(N-1)`: `Query` the trailing 150-row window (`sk begins_with "2"`, `ScanIndexForward=False`) — same access pattern as the scorer; pooled across the fleet.
 - `GetItem` the FLEET STATE row (edge-trigger input, ADR 0012).
 - `PutItem` the FLEET STATE row `{pump_id="FLEET", sk="STATE", latest_ts, latest_psi (4-key Map), alert_flag, pumps_reporting[, last_alert_sent_at]}`. `FLEET` is a SEPARATE partition — invisible to the per-pump scorer/batcher iteration and the score-path query.
 - SNS publish on the False → True `alert_flag` flip only (ADR 0012); PSI-only payload (see §SNS alert payload, FLEET-scope note).

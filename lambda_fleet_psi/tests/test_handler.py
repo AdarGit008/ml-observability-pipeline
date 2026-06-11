@@ -6,7 +6,7 @@ Coverage:
   ``lambda_scorer`` guards. This Lambda is in the parity set because it
   imports ``compute_psi``; the guards pin that it shares ONE definition
   of fleet-drift-is-meaningful-and-breaching with the per-pump scorer.
-- Cold-start: reference loads; FLEET_SIZE expands to P-01..P-NN;
+- Cold-start: reference loads; FLEET_SIZE expands to P-00..P-(N-1);
   missing SNS_TOPIC_ARN fails fast (ADR 0012 posture).
 - Pooling: readings across multiple pumps fold into ONE fleet PSI on
   the FLEET STATE row (ADR 0018); ``pumps_reporting`` counts the
@@ -75,13 +75,19 @@ def test_structural_parity_load_reference_loads_from_shared():
 
 def test_cold_start_reference_and_fleet_ids(fresh_fleet):
     """Reference loads with the ADR 0009 4-feature surface; FLEET_SIZE
-    expands to the two-digit P-01..P-NN id list.
+    expands to the two-digit P-00..P-(N-1) id list.
     """
     handler_mod, _ = fresh_fleet
     ref = handler_mod.REFERENCE
     assert isinstance(ref, dict)
     assert tuple(ref["feature_names"]) == PSI_FEATURE_NAMES
-    assert handler_mod.FLEET_PUMP_IDS == tuple(f"P-{i:02d}" for i in range(1, 16))
+    assert handler_mod.FLEET_PUMP_IDS == tuple(f"P-{i:02d}" for i in range(15))
+    # Regression guard (off-by-one fixed 2026-06-11): the fleet is
+    # P-00..P-14 (0-indexed), NOT P-01..P-15 — pooling must include
+    # P-00 and never query a phantom P-15 (same fix as the batcher
+    # + the 2026-06-07 adapter fix).
+    assert handler_mod.FLEET_PUMP_IDS[0] == "P-00"
+    assert "P-15" not in handler_mod.FLEET_PUMP_IDS
 
 
 def test_cold_start_missing_sns_topic_arn_raises(monkeypatch):

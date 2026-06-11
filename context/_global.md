@@ -49,6 +49,8 @@ These are facts that span multiple components. They are NOT in any one component
 
 - **Mode-parity boundary (ADR 0005, Accepted 2026-05-29).** `shared/{features,score,drift}.py` is the locked parity contract. Both `local_runtime` and `lambda_scorer` import it as peers — no vendoring, no forks. Enforced by `local_runtime/tests/test_service.py::test_structural_parity_no_vendoring` (+ siblings). **If your session is in the parity set, you must follow DEV_NORMS §5 Tier 2b loading.** Parity set: `lambda_scorer`, `model`, `drift`, `local_runtime`, `dashboards`.
 
+- **Fleet pump-id enumeration (2026-06-11).** `FLEET_PUMP_IDS = tuple(f"P-{i:02d}" for i in range(FLEET_SIZE))` is duplicated in `dashboards_adapter`, `lambda_s3_batcher`, and `lambda_fleet_psi` (each from its own `FLEET_SIZE` env var). It MUST be 0-indexed — `P-00..P-(FLEET_SIZE-1)`. A 1-indexed `range(1, FLEET_SIZE+1)` copy silently dropped P-00 in two of the three (fixed 2026-06-11; the batcher never archived P-00 to S3, the fleet Lambda pooled 14 of 15). Pinned by `lambda_fleet_psi/tests/test_fleet_id_consistency.py`. Deduping into a shared NON-parity home is open SSOT debt — `shared/` is the wrong place (AWS-fleet concept, not a parity peer); revisit if a 4th consumer appears.
+
 ## Where to look next
 - Workflow + roles: `DEV_NORMS.md`
 - Context-loading rules (including Tier 2b parity loads): `DEV_NORMS.md §5`

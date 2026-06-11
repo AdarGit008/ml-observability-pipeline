@@ -6,7 +6,7 @@ Plant-wide drift detector. EventBridge wakes it every 5 minutes; it pools the tr
 ## Current state
 - ✅ **Handler + tests shipped 2026-06-10 (ADR 0018):** `lambda_fleet_psi/handler.py` + 9 moto tests (3 structural-parity + cold-start + pooling/healthy + empty no-op + drifting edge-publish + warmup-gate). In the parity set (imports `compute_psi`).
 - ⏳ **Terraform + build script + teardown DEFERRED to an infra session** (PO scope call 2026-06-10). Not yet deployable.
-- Reads the hot table via the scorer's per-pump `Query` (ADR 0010); pools across `P-01..P-NN`; one `compute_psi` on the pooled window. Arms via the shared composite `psi_alert_should_fire` (ADR 0017) — same warmup gate (`PSI_MIN_SAMPLES`) + 0.25 threshold as the per-pump scorer. No score path (drift-only).
+- Reads the hot table via the scorer's per-pump `Query` (ADR 0010); pools across `P-00..P-(N-1)`; one `compute_psi` on the pooled window. Arms via the shared composite `psi_alert_should_fire` (ADR 0017) — same warmup gate (`PSI_MIN_SAMPLES`) + 0.25 threshold as the per-pump scorer. No score path (drift-only).
 - FLEET is a separate DynamoDB partition → invisible to the scorer/batcher per-pump iteration and the score-path query; disturbs no existing access pattern.
 
 ## Interfaces (in / out)
@@ -18,7 +18,7 @@ Plant-wide drift detector. EventBridge wakes it every 5 minutes; it pools the tr
 ## Environment variables
 - `DDB_TABLE_NAME` — default `pump_hot_state`.
 - `SNS_TOPIC_ARN` — **required**; `KeyError` at cold start if unset (ADR 0012 fail-fast). Reuses the scorer's topic.
-- `FLEET_SIZE` — default 15; 1..99 validated; expands to `P-01..P-NN`.
+- `FLEET_SIZE` — default 15; 1..99 validated; expands to `P-00..P-(N-1)`.
 - `DDB_ENDPOINT_URL` — local-test affordance. `AWS_REGION` — default `eu-central-1`.
 
 ## Resource sizing (target — Terraform deferred)

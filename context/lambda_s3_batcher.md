@@ -25,6 +25,15 @@ dashboards adapter / ADR 0014 §Decision 5).
   dedupe key is `(pump_id, ts)`. Terraform pins
   `reserved_concurrent_executions = 1` so overlap needs a genuine
   failure, not scheduling jitter.
+- 🐛→✅ **Off-by-one fixed 2026-06-11 (fleet-psi live-verify session):**
+  `FLEET_PUMP_IDS` enumerated `P-01..P-15` (`range(1, FLEET_SIZE+1)`) —
+  it silently dropped **P-00** (its readings were never drained to S3)
+  and wasted a Query on a phantom P-15. Corrected to `range(FLEET_SIZE)`
+  (P-00..P-(N-1)), matching the adapter (fixed 2026-06-07) and the fleet
+  Lambda (fixed in the same commit). Guarded by
+  `test_p00_is_archived_off_by_one_regression` + the cross-component
+  `lambda_fleet_psi/tests/test_fleet_id_consistency.py`. The existing 18
+  tests missed it because they all seed P-01/P-02 (in-range either way).
 
 ## Interfaces (in / out)
 - **In:** EventBridge scheduled event (payload unused — the table

@@ -342,3 +342,27 @@ def test_negative_safety_lag_fails_cold_start(fresh_batcher, monkeypatch):
     finally:
         monkeypatch.delenv("SAFETY_LAG_SECONDS")
         importlib.reload(handler_mod)
+
+
+# --- §Off-by-one regression (fixed 2026-06-11) ---
+
+def test_p00_is_archived_off_by_one_regression(fresh_batcher):
+    """FLEET_PUMP_IDS must enumerate P-00..P-(FLEET_SIZE-1). The pre-fix
+    range(1, FLEET_SIZE + 1) dropped P-00 entirely, so P-00's readings
+    were never drained to S3 — silent cold-path data loss for one pump,
+    invisible because every other test seeds P-01/P-02. Seed ONLY P-00
+    and assert it lands in a Parquet file."""
+    handler_mod, table, s3 = fresh_batcher
+    assert handler_mod.FLEET_PUMP_IDS[0] == "P-00"
+    assert "P-15" not in handler_mod.FLEET_PUMP_IDS
+    put_reading_row(table, "P-00", "2026-06-04T12:00:01.000Z", score=0.42)
+
+    summary = handler_mod.run_batch(CUTOFF_1)
+
+    assert summary["archived_rows"] == 1
+    assert summary["pumps_with_rows"] == 1
+    (key,) = list_archive_keys(s3)
+    rows = read_parquet(s3, key).to_pylist()
+    assert [(r["pump_id"], r["ts"]) for r in rows] == [
+        ("P-00", "2026-06-04T12:00:01.000Z"),
+    ]
