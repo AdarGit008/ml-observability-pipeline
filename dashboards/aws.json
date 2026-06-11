@@ -421,6 +421,253 @@
         ]
       },
       "options": { "sortBy": [{ "displayName": "pump_id", "desc": false }] }
+    },
+    {
+      "id": 9,
+      "type": "gauge",
+      "title": "Fleet PSI — vibration_amp (pooled plant-wide — ADR 0018)",
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "infinity-aws" },
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 31 },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "url": "",
+          "url_options": { "method": "GET", "data": "" },
+          "root_selector": "$.fleet",
+          "columns": [
+            { "selector": "psi_vibration_amp", "text": "psi_vibration_amp", "type": "number" }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 0.5,
+          "decimals": 3,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "#EAB839", "value": 0.1 },
+              { "color": "red", "value": 0.25 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "/^psi_vibration_amp$/", "values": false },
+        "orientation": "auto",
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      }
+    },
+    {
+      "id": 10,
+      "type": "gauge",
+      "title": "Fleet PSI — bearing_temp (pooled plant-wide — ADR 0018)",
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "infinity-aws" },
+      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 31 },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "url": "",
+          "url_options": { "method": "GET", "data": "" },
+          "root_selector": "$.fleet",
+          "columns": [
+            { "selector": "psi_bearing_temp", "text": "psi_bearing_temp", "type": "number" }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 0.5,
+          "decimals": 3,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "#EAB839", "value": 0.1 },
+              { "color": "red", "value": 0.25 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "/^psi_bearing_temp$/", "values": false },
+        "orientation": "auto",
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      }
+    },
+    {
+      "id": 11,
+      "type": "gauge",
+      "title": "Fleet PSI — motor_current (pooled plant-wide — ADR 0018)",
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "infinity-aws" },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 31 },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "url": "",
+          "url_options": { "method": "GET", "data": "" },
+          "root_selector": "$.fleet",
+          "columns": [
+            { "selector": "psi_motor_current", "text": "psi_motor_current", "type": "number" }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 0.5,
+          "decimals": 3,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "#EAB839", "value": 0.1 },
+              { "color": "red", "value": 0.25 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "/^psi_motor_current$/", "values": false },
+        "orientation": "auto",
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      }
+    },
+    {
+      "id": 12,
+      "type": "gauge",
+      "title": "Fleet PSI — rpm (pooled plant-wide — ADR 0018)",
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "infinity-aws" },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 31 },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "url": "",
+          "url_options": { "method": "GET", "data": "" },
+          "root_selector": "$.fleet",
+          "columns": [
+            { "selector": "psi_rpm", "text": "psi_rpm", "type": "number" }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 0.5,
+          "decimals": 3,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "#EAB839", "value": 0.1 },
+              { "color": "red", "value": 0.25 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "/^psi_rpm$/", "values": false },
+        "orientation": "auto",
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      }
+    },
+    {
+      "id": 13,
+      "type": "table",
+      "title": "Fleet alert state (FLEET STATE row — ADR 0018; pooled, AWS-only)",
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "infinity-aws" },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 39 },
+      "targets": [
+        {
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "url": "",
+          "url_options": { "method": "GET", "data": "" },
+          "root_selector": "$.fleet",
+          "columns": [
+            { "selector": "latest_ts", "text": "latest_ts", "type": "string" },
+            { "selector": "pumps_pooled", "text": "pumps_pooled", "type": "number" },
+            { "selector": "alert_flag", "text": "alert_flag", "type": "boolean" },
+            { "selector": "last_alert_sent_at", "text": "last_alert_sent_at", "type": "string" }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "auto", "cellOptions": { "type": "auto" } },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "green", "value": null }]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "pumps_pooled" },
+            "properties": [{ "id": "displayName", "value": "pumps pooled" }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "alert_flag" },
+            "properties": [
+              { "id": "custom.cellOptions", "value": { "type": "color-background" } },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "false": { "color": "green", "index": 0, "text": "OK" },
+                      "true": { "color": "red", "index": 1, "text": "ALERT" }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "last_alert_sent_at" },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "special",
+                    "options": {
+                      "match": "null",
+                      "result": { "index": 0, "text": "never" }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "options": {}
     }
   ]
 }

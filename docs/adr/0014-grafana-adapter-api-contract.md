@@ -252,3 +252,125 @@ makes the coupling a visible, Terraform-set knob. Rejected.
 - Session log: `docs/sessions/2026-06-04-dashboards-adapter-contract.md`.
 - Infinity plugin: https://grafana.com/grafana/plugins/yesoreyeram-infinity-datasource/
 - Lambda Function URLs: https://docs.aws.amazon.com/lambda/latest/dg/urls-configuration.html
+
+
+## Addendum 2026-06-10 — FLEET object (ADR 0018 dashboards follow-up)
+
+ADR 0018 built `lambda_fleet_psi`, which writes a pooled plant-wide PSI
+to a reserved `pump_id="FLEET", sk="STATE"` row, and parked the
+dashboard surfacing as a follow-up ("the adapter's `BatchGetItem` reads
+the 15 pump STATE keys; a FLEET panel is a small follow-on adapter
+change", ADR 0018 §Follow-ups). This addendum folds that change. It is
+**additive** — the `pumps[]` array and every existing key are untouched,
+so no consumer (Infinity panel or otherwise) breaks. Two points were
+adjusted after the DeepSeek review (2026-06-11, `deepseek-reasoner`):
+the absent-row representation (§Decision 3 below) and the wire name of
+the pooled count (§Decision 2 below).
+
+### Contract bump (additive)
+
+1. **One extra BatchGetItem key.** The adapter now requests
+   `FLEET_PUMP_IDS + ("FLEET",)` — the 15 pump STATE rows plus the one
+   FLEET aggregate row — in the SAME single `BatchGetItem` (still one
+   round trip; ADR 0010 access pattern + ADR 0013 cost posture hold at
+   16 keys ≈ 6 KB). `FLEET` is a separate partition (ADR 0018
+   §Decision 4), so this disturbs no per-pump access pattern.
+
+2. **New top-level `fleet` object** (sibling of `pumps`):
+
+   ```json
+   "fleet": {
+     "latest_ts":          "2026-06-10T14:30:00.000Z",
+     "psi_vibration_amp":  0.30,
+     "psi_bearing_temp":   0.12,
+     "psi_motor_current":  0.20,
+     "psi_rpm":            0.15,
+     "alert_flag":         true,
+     "last_alert_sent_at": "2026-06-10T14:25:00.000Z",
+     "pumps_pooled":       15
+   }
+   ```
+
+   - **Same projection rules as a pump entry** — `latest_psi` Map
+     flattens to the `psi_<feature>` ADR 0005 §3 vocabulary, `Decimal`
+     → `float`, absent `last_alert_sent_at` → JSON `null`, alert fields
+     are literal passthroughs (ADR 0012 §Alternatives 2C — still no
+     client-side threshold re-derivation).
+   - **MINUS `latest_score`** — the fleet path runs no model (ADR 0018
+     §5), so the FLEET row never carries a score; the `fleet` object
+     omits the key entirely (not null) to make "there is no model here"
+     explicit. This is why the FLEET row is projected by a dedicated
+     `_fleet_entry`, never through `_pump_entry` (which hard-reads
+     `latest_score`).
+   - **PLUS `pumps_pooled`** — how many pumps fed the pooled 5-minute
+     window (ADR 0018 §Decision 4). The FLEET **row** stores this as
+     `pumps_reporting`; the adapter **renames it on the wire** to
+     `pumps_pooled` to disambiguate from the envelope's **top-level**
+     `pumps_reporting` (pumps that have a STATE row) — the two counts
+     differ (throttled writes, partial window) and the shared name was a
+     confusion risk (DeepSeek review §2). Projection-divergence from a
+     storage attribute name is allowed — the adapter is a projection.
+   - **`pump_id` is dropped** — it is the constant `"FLEET"` (the
+     scope is the object's identity, not a column).
+
+3. **`fleet` is an empty object `{}` when the FLEET row is absent** —
+   the fleet Lambda has not run yet, or its empty-fleet no-op skipped the
+   write (ADR 0018 §Decision 7). `{}` is the single-object analogue of
+   the per-pump omit-the-row rule (a missing pump is dropped from
+   `pumps[]`), and it keeps a JSON `null` off Infinity's `$.fleet` root
+   selector — null-at-root behaviour is version-dependent in Infinity
+   and was a demo-day risk (DeepSeek review §3). The key is always
+   present; its value is `{}` (absent) or the populated object. Gauges
+   and the alert table render "No data" over `{}` and — crucially — the
+   adapter fabricates NO `alert_flag: false` "all-clear" for a fleet
+   that simply has not been measured (PO call 2026-06-11).
+
+### Timestamp semantics (skew)
+
+`as_of` is the adapter's invocation time; `fleet.latest_ts` and each
+`pumps[i].latest_ts` are when those rows were last written by their
+producers — the fleet Lambda (5-min EventBridge cadence) and the
+per-pump scorer (per-reading) run on different clocks. A consumer
+correlating `fleet.latest_ts` against a pump's `latest_ts` must tolerate
+skew (DeepSeek review §1). Documented in `_interfaces.md` + the handler
+docstring.
+
+### Mode-parity note (FLEET is AWS-only)
+
+The FLEET row + alert fields exist only in the AWS hot path; local
+InfluxDB carries the 13-field per-pump schema with no FLEET concept
+(ADR 0005 §3). So the FLEET panel is added to `dashboards/aws.json`
+**only** — there is no local-mode counterpart, the same asymmetry the
+alert-state / `pumps_reporting` panels already have (ADR 0014
+§Follow-ups, `context/dashboards.md`). The panel-vocabulary parity test
+reuses the `psi_<feature>` names derived from
+`shared.features.PSI_FEATURE_NAMES`; the one genuinely new wire token,
+`pumps_pooled`, is added to the test's `_ADAPTER_KEYS` allowed-set in
+the same change.
+
+### Still NOT a brain
+
+The adapter still imports no `shared/`, evaluates no threshold, and
+computes nothing — surfacing the FLEET row is a pure passthrough of a
+value `lambda_fleet_psi` already computed. `test_adapter_does_not_import_shared`
+and `test_no_threshold_logic_in_module` remain the tripwires; both stay
+green. The Principle ("a projection, not a brain") is unchanged.
+
+### Tests
+
+`dashboards_adapter/tests/test_adapter.py` gains a `§FLEET row` section
+(surfaced-as-object, excluded-from-`pumps`, absent→`{}`, alert
+passthrough, never-alerted→null, malformed-row→500) and updates the
+read-efficiency test to the 16-key set; `conftest.py` gains a
+`put_fleet_state_row` helper. Adapter package: 16 → 23 tests.
+`dashboards/tests/test_dashboard_vocabulary.py` (7) green with
+`pumps_pooled` added to the contract allowed-set.
+
+### Panels (`dashboards/aws.json`)
+
+Five AWS-only panels (ids 9–13): four `gauge` panels (one per pooled
+`psi_<feature>`, `root_selector: "$.fleet"`, the standard 0.10/0.25 band
+thresholds) and a `table` of the FLEET alert state (`pumps_pooled`,
+`alert_flag` OK/ALERT-mapped, `last_alert_sent_at` null→"never" — the
+same display mappings as the per-pump alert-state table, NO threshold
+re-derivation).

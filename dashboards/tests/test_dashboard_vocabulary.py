@@ -59,6 +59,7 @@ _LOCAL_QUERYABLE_FIELDS = {"score"} | _PSI_FIELDS
 _ADAPTER_KEYS = {
     "fleet_size",
     "pumps_reporting",
+    "pumps_pooled",  # FLEET object pooled-window count (ADR 0018; wire rename of the row attr)
     "as_of",
     "pump_id",
     "latest_ts",

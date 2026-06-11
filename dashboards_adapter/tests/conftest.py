@@ -12,7 +12,9 @@ module docstring for the long form):
   reaching a real account (2026-06-04 housekeeping posture).
 
 The adapter has no SNS, no model artifact, and no reference JSON —
-the fixture surface is just the ADR 0010 table plus a seeding helper.
+the fixture surface is just the ADR 0010 table plus seeding helpers
+(``put_state_row`` for per-pump STATE rows; ``put_fleet_state_row`` for
+the ADR 0018 pooled FLEET aggregate row).
 """
 
 from __future__ import annotations
@@ -109,6 +111,47 @@ def put_state_row(
         "latest_score": Decimal(str(score)),
         "latest_psi": {k: Decimal(str(v)) for k, v in psi.items()},
         "alert_flag": alert_flag,
+    }
+    if last_alert_sent_at is not None:
+        item["last_alert_sent_at"] = last_alert_sent_at
+    table.put_item(Item=item)
+
+
+def put_fleet_state_row(
+    table: Any,
+    *,
+    psi: dict[str, float] | None = None,
+    alert_flag: bool = False,
+    last_alert_sent_at: str | None = None,
+    pumps_reporting: int = 15,
+    latest_ts: str = "2026-06-04T12:00:00.000Z",
+) -> None:
+    """Seed the FLEET aggregate STATE row shaped per ``lambda_fleet_psi``
+    (ADR 0018) and ``_interfaces.md §Fleet-PSI DynamoDB writes``.
+
+    Differs from ``put_state_row`` exactly as production does: partition
+    key ``"FLEET"``, NO ``latest_score`` (the fleet path runs no model),
+    PLUS ``pumps_reporting`` (the pooled-window pump count). Floats go
+    through ``Decimal(str(...))`` and ``pumps_reporting`` is written as a
+    Number, matching what ``lambda_fleet_psi`` puts — so the adapter
+    tests read the types production writes. ``last_alert_sent_at`` is
+    OMITTED when ``None`` (the ADR 0012 absent-until-first-publish
+    convention).
+    """
+    if psi is None:
+        psi = {
+            "vibration_amp": 0.30,
+            "bearing_temp": 0.12,
+            "motor_current": 0.20,
+            "rpm": 0.15,
+        }
+    item: dict[str, Any] = {
+        "pump_id": "FLEET",
+        "sk": "STATE",
+        "latest_ts": latest_ts,
+        "latest_psi": {k: Decimal(str(v)) for k, v in psi.items()},
+        "alert_flag": alert_flag,
+        "pumps_reporting": pumps_reporting,
     }
     if last_alert_sent_at is not None:
         item["last_alert_sent_at"] = last_alert_sent_at

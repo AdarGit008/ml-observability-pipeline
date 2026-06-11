@@ -1,0 +1,62 @@
+<svg width="100%" viewBox="0 0 680 452" role="img" xmlns="http://www.w3.org/2000/svg">
+<title>ML Observability Pipeline — Features</title>
+<desc>Eight capabilities: failure scoring, PSI drift detection, warmup gate, fleet-PSI pooling, edge-triggered alerts, hot and cold paths, dual-mode parity, and a cost guardrail.</desc>
+<style>
+text{font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif}
+.tt{font-size:16px;font-weight:700;fill:#2C2C2A}
+.sub{font-size:12px;font-weight:400;fill:#6B6A64}
+.t{font-size:13px;font-weight:700}
+.ts{font-size:11px;font-weight:400;fill:#5F5E5A}
+</style>
+<rect x="0" y="0" width="680" height="452" fill="#FCFBF8"/>
+<text x="40" y="32" class="tt">ML Observability Pipeline — Features</text>
+<text x="40" y="50" class="sub">What the pipeline does: scoring, drift detection, alerting, parity, and cost control</text>
+
+<rect x="40" y="78" width="290" height="78" rx="10" fill="#FBFAF6" stroke="#DDDBD2"/>
+<rect x="50" y="90" width="4" height="54" rx="2" fill="#378ADD"/>
+<text x="64" y="104" class="t" fill="#185FA5">Failure scoring</text>
+<text x="64" y="124" class="ts">P(failure within 48h) per pump,</text>
+<text x="64" y="140" class="ts">HistGradientBoostingClassifier.</text>
+
+<rect x="350" y="78" width="290" height="78" rx="10" fill="#FBFAF6" stroke="#DDDBD2"/>
+<rect x="360" y="90" width="4" height="54" rx="2" fill="#EF9F27"/>
+<text x="374" y="104" class="t" fill="#854F0B">PSI drift detection</text>
+<text x="374" y="124" class="ts">Population Stability Index on 4 raw</text>
+<text x="374" y="140" class="ts">signals · Laplace-smoothed bins.</text>
+
+<rect x="40" y="166" width="290" height="78" rx="10" fill="#FBFAF6" stroke="#DDDBD2"/>
+<rect x="50" y="178" width="4" height="54" rx="2" fill="#EF9F27"/>
+<text x="64" y="192" class="t" fill="#854F0B">Warmup gate · ADR 0017</text>
+<text x="64" y="212" class="ts">PSI alerts arm only at &#8805;150 samples</text>
+<text x="64" y="228" class="ts">&#8212; no cold-start false positives.</text>
+
+<rect x="350" y="166" width="290" height="78" rx="10" fill="#FBFAF6" stroke="#DDDBD2"/>
+<rect x="360" y="178" width="4" height="54" rx="2" fill="#EF9F27"/>
+<text x="374" y="192" class="t" fill="#854F0B">Fleet-PSI pooling · ADR 0018</text>
+<text x="374" y="212" class="ts">Pools all pumps every 5 min to catch</text>
+<text x="374" y="228" class="ts">plant-wide drift one pump can hide.</text>
+
+<rect x="40" y="254" width="290" height="78" rx="10" fill="#FBFAF6" stroke="#DDDBD2"/>
+<rect x="50" y="266" width="4" height="54" rx="2" fill="#D85A30"/>
+<text x="64" y="280" class="t" fill="#C0442A">Edge-triggered alerts</text>
+<text x="64" y="300" class="ts">At-most-once SNS per breach via</text>
+<text x="64" y="316" class="ts">two-attribute state flip (ADR 0012).</text>
+
+<rect x="350" y="254" width="290" height="78" rx="10" fill="#FBFAF6" stroke="#DDDBD2"/>
+<rect x="360" y="266" width="4" height="54" rx="2" fill="#378ADD"/>
+<text x="374" y="280" class="t" fill="#185FA5">Hot + cold paths</text>
+<text x="374" y="300" class="ts">Real-time DynamoDB state + async</text>
+<text x="374" y="316" class="ts">Parquet archive to S3 / Athena.</text>
+
+<rect x="40" y="342" width="290" height="78" rx="10" fill="#FBFAF6" stroke="#DDDBD2"/>
+<rect x="50" y="354" width="4" height="54" rx="2" fill="#7F77DD"/>
+<text x="64" y="368" class="t" fill="#3C3489">Dual-mode parity</text>
+<text x="64" y="388" class="ts">Identical shared logic in local &amp;</text>
+<text x="64" y="404" class="ts">AWS &#8212; guarded by parity tests.</text>
+
+<rect x="350" y="342" width="290" height="78" rx="10" fill="#FBFAF6" stroke="#DDDBD2"/>
+<rect x="360" y="354" width="4" height="54" rx="2" fill="#639922"/>
+<text x="374" y="368" class="t" fill="#3B6D11">Cost guardrail</text>
+<text x="374" y="388" class="ts">~$0.01 per run, on-demand billing,</text>
+<text x="374" y="404" class="ts">ephemeral teardown · $0 local.</text>
+</svg>

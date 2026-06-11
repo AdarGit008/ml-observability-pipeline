@@ -182,3 +182,46 @@ One GET (path ignored; non-GET → 405) returns:
 - `alert_flag` (current breach) + `last_alert_sent_at` (last page) are **literal STATE-row passthroughs** — no client-side threshold re-derivation (ADR 0012 §Alternatives 2C). Storage's absent-until-first-publish maps to explicit JSON `null` on the wire (stable key set; ADR 0014 §Decision 2).
 - Pumps without a STATE row are **omitted** (no null-filled placeholders); `pumps_reporting` vs `fleet_size` carries the gap.
 - `pumps` is sorted by `pump_id`; failures return 500 with a generic body (the URL is public); persistent `UnprocessedKeys` is a 500, never a silently short list.
+
+### FLEET object (ADR 0018 follow-up, 2026-06-10 — additive)
+
+The adapter additionally requests the `pump_id="FLEET"` aggregate STATE
+row (ADR 0018) in the SAME `BatchGetItem` (16 keys: 15 pumps + FLEET)
+and surfaces it as a top-level **`fleet`** object beside `pumps` —
+additive; `pumps[]` and all existing keys are unchanged. See ADR 0014
+§Addendum 2026-06-10 for the full rationale.
+
+```json
+"fleet": {
+  "latest_ts":          "2026-06-10T14:30:00.000Z",
+  "psi_vibration_amp":  0.30,
+  "psi_bearing_temp":   0.12,
+  "psi_motor_current":  0.20,
+  "psi_rpm":            0.15,
+  "alert_flag":         true,
+  "last_alert_sent_at": "2026-06-10T14:25:00.000Z",
+  "pumps_pooled":       15
+}
+```
+
+- Same projection as a pump entry (flattened `psi_<feature>`, Decimal→
+  float, literal alert passthrough, absent `last_alert_sent_at` → JSON
+  `null`) **minus `latest_score`** (no model on the fleet path, ADR 0018
+  §5) **plus `pumps_pooled`** — the pooled-window pump count.
+- **Wire rename:** the FLEET *row* stores the pooled count as
+  `pumps_reporting`; the adapter projects it to **`pumps_pooled`** on the
+  wire to disambiguate from the envelope's top-level `pumps_reporting`
+  (pumps with a STATE row). The two counts can differ (throttled writes,
+  partial window); the rename removes the name collision (DeepSeek review
+  2026-06-11 §2).
+- `fleet` is an empty object **`{}`** when no FLEET STATE row exists yet
+  (fleet Lambda not run, or its empty-fleet no-op) — the single-object
+  analogue of the per-pump omit-the-row rule; keeps a `null` off
+  Infinity's `$.fleet` root selector and fabricates no `alert_flag`
+  all-clear (DeepSeek review §3). The key is always present.
+- `as_of` (adapter invocation time) vs `fleet.latest_ts` / pump
+  `latest_ts` (row write times) can skew — the fleet Lambda's 5-min
+  cadence and the scorer's per-reading writes run on different clocks
+  (DeepSeek review §1).
+- FLEET is **AWS-only** (local InfluxDB has no FLEET row / alert fields,
+  ADR 0005 §3); the panel lives in `dashboards/aws.json` only.

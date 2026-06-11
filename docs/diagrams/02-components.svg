@@ -1,0 +1,84 @@
+<svg width="100%" viewBox="0 0 680 524" role="img" xmlns="http://www.w3.org/2000/svg">
+<title>ML Observability Pipeline — Components</title>
+<desc>Component catalog grouped by layer: data generation, shared parity contract, local runtime, AWS Lambda functions, and AWS infrastructure.</desc>
+<style>
+text{font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif}
+.tt{font-size:16px;font-weight:700;fill:#2C2C2A}
+.sub{font-size:12px;font-weight:400;fill:#6B6A64}
+.t{font-size:12.5px;font-weight:600;fill:#2C2C2A}
+.ts{font-size:11px;font-weight:400;fill:#6B6A64}
+.hd{font-size:12px;font-weight:700}
+</style>
+<rect x="0" y="0" width="680" height="524" fill="#FCFBF8"/>
+<text x="40" y="32" class="tt">ML Observability Pipeline — Components</text>
+<text x="40" y="50" class="sub">Grouped by layer · simulator → shared contract → local + AWS runtimes</text>
+
+<rect x="40" y="64" width="600" height="22" rx="6" fill="#F1EFE8"/>
+<text x="52" y="79" class="hd" fill="#5F5E5A">DATA GENERATION</text>
+<rect x="40" y="90" width="290" height="44" rx="9" fill="#F7F6F1" stroke="#C9C7BD"/>
+<text x="185" y="111" text-anchor="middle" class="t">simulator/</text>
+<text x="185" y="126" text-anchor="middle" class="ts">15 pumps · degradation FSM</text>
+
+<rect x="40" y="146" width="600" height="22" rx="6" fill="#EEEDFE"/>
+<text x="52" y="161" class="hd" fill="#3C3489">SHARED CONTRACT · parity (ADR 0005)</text>
+<rect x="40" y="172" width="190" height="44" rx="9" fill="#F6F5FE" stroke="#B8B1EE"/>
+<text x="135" y="193" text-anchor="middle" class="t">features.py</text>
+<text x="135" y="208" text-anchor="middle" class="ts">extract_features</text>
+<rect x="245" y="172" width="190" height="44" rx="9" fill="#F6F5FE" stroke="#B8B1EE"/>
+<text x="340" y="193" text-anchor="middle" class="t">score.py</text>
+<text x="340" y="208" text-anchor="middle" class="ts">HistGradientBoosting</text>
+<rect x="450" y="172" width="190" height="44" rx="9" fill="#F6F5FE" stroke="#B8B1EE"/>
+<text x="545" y="193" text-anchor="middle" class="t">drift.py</text>
+<text x="545" y="208" text-anchor="middle" class="ts">compute_psi (PSI)</text>
+
+<rect x="40" y="228" width="600" height="22" rx="6" fill="#E1F5EE"/>
+<text x="52" y="243" class="hd" fill="#0F6E56">LOCAL RUNTIME · $0 Docker Compose</text>
+<rect x="40" y="254" width="141" height="44" rx="9" fill="#F0FBF7" stroke="#9FE1CB"/>
+<text x="110" y="275" text-anchor="middle" class="t">Mosquitto</text>
+<text x="110" y="290" text-anchor="middle" class="ts">MQTT broker</text>
+<rect x="193" y="254" width="141" height="44" rx="9" fill="#F0FBF7" stroke="#9FE1CB"/>
+<text x="263" y="275" text-anchor="middle" class="t">ScorerService</text>
+<text x="263" y="290" text-anchor="middle" class="ts">MQTT → shared</text>
+<rect x="346" y="254" width="141" height="44" rx="9" fill="#F0FBF7" stroke="#9FE1CB"/>
+<text x="416" y="275" text-anchor="middle" class="t">InfluxDB</text>
+<text x="416" y="290" text-anchor="middle" class="ts">time-series</text>
+<rect x="499" y="254" width="141" height="44" rx="9" fill="#F0FBF7" stroke="#9FE1CB"/>
+<text x="569" y="275" text-anchor="middle" class="t">Grafana</text>
+<text x="569" y="290" text-anchor="middle" class="ts">dashboards</text>
+
+<rect x="40" y="310" width="600" height="22" rx="6" fill="#E6F1FB"/>
+<text x="52" y="325" class="hd" fill="#185FA5">AWS FUNCTIONS · Lambda</text>
+<rect x="40" y="336" width="141" height="46" rx="9" fill="#F2F8FD" stroke="#AFCFF0"/>
+<text x="110" y="357" text-anchor="middle" class="t">lambda_scorer</text>
+<text x="110" y="372" text-anchor="middle" class="ts">hot path · per msg</text>
+<rect x="193" y="336" width="141" height="46" rx="9" fill="#F2F8FD" stroke="#AFCFF0"/>
+<text x="263" y="357" text-anchor="middle" class="t">lambda_s3_batcher</text>
+<text x="263" y="372" text-anchor="middle" class="ts">cold path · 60s</text>
+<rect x="346" y="336" width="141" height="46" rx="9" fill="#F2F8FD" stroke="#AFCFF0"/>
+<text x="416" y="357" text-anchor="middle" class="t">lambda_fleet_psi</text>
+<text x="416" y="372" text-anchor="middle" class="ts">fleet drift · 5min</text>
+<rect x="499" y="336" width="141" height="46" rx="9" fill="#F2F8FD" stroke="#AFCFF0"/>
+<text x="569" y="357" text-anchor="middle" class="t">dashboards_adapter</text>
+<text x="569" y="372" text-anchor="middle" class="ts">Grafana JSON source</text>
+
+<rect x="40" y="394" width="600" height="22" rx="6" fill="#ECEFF2"/>
+<text x="52" y="409" class="hd" fill="#44505A">AWS INFRASTRUCTURE</text>
+<rect x="40" y="420" width="190" height="42" rx="9" fill="#F5F7F9" stroke="#C5CDD4"/>
+<text x="135" y="440" text-anchor="middle" class="t">IoT Core</text>
+<text x="135" y="454" text-anchor="middle" class="ts">15 things · mTLS · rules</text>
+<rect x="245" y="420" width="190" height="42" rx="9" fill="#F5F7F9" stroke="#C5CDD4"/>
+<text x="340" y="440" text-anchor="middle" class="t">DynamoDB</text>
+<text x="340" y="454" text-anchor="middle" class="ts">hot state + watermark</text>
+<rect x="450" y="420" width="190" height="42" rx="9" fill="#F5F7F9" stroke="#C5CDD4"/>
+<text x="545" y="440" text-anchor="middle" class="t">S3</text>
+<text x="545" y="454" text-anchor="middle" class="ts">Parquet archive</text>
+<rect x="40" y="468" width="190" height="42" rx="9" fill="#F5F7F9" stroke="#C5CDD4"/>
+<text x="135" y="488" text-anchor="middle" class="t">Glue Catalog</text>
+<text x="135" y="502" text-anchor="middle" class="ts">Athena schema</text>
+<rect x="245" y="468" width="190" height="42" rx="9" fill="#F5F7F9" stroke="#C5CDD4"/>
+<text x="340" y="488" text-anchor="middle" class="t">SNS</text>
+<text x="340" y="502" text-anchor="middle" class="ts">edge-triggered alerts</text>
+<rect x="450" y="468" width="190" height="42" rx="9" fill="#F5F7F9" stroke="#C5CDD4"/>
+<text x="545" y="488" text-anchor="middle" class="t">EventBridge</text>
+<text x="545" y="502" text-anchor="middle" class="ts">cold + fleet schedules</text>
+</svg>

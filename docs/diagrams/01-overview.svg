@@ -1,0 +1,81 @@
+<svg width="100%" viewBox="0 0 680 400" role="img" xmlns="http://www.w3.org/2000/svg">
+<title>ML Observability Pipeline — Overview</title>
+<desc>A pump simulator feeds two runtimes — a $0 local mode and an ephemeral AWS mode — and both call one shared scoring core (extract_features, score, compute_psi) that guarantees parity.</desc>
+<style>
+text{font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif}
+.tt{font-size:16px;font-weight:700;fill:#2C2C2A}
+.sub{font-size:12px;font-weight:400;fill:#6B6A64}
+.t{font-size:13px;font-weight:600;fill:#2C2C2A}
+.ts{font-size:11px;font-weight:400;fill:#6B6A64}
+.arr{stroke:#A7A59C;stroke-width:1.4;fill:none}
+.dash{stroke:#7F77DD;stroke-width:1.5;fill:none;stroke-dasharray:4 3}
+</style>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<rect x="0" y="0" width="680" height="400" fill="#FCFBF8"/>
+<text x="40" y="32" class="tt">ML Observability Pipeline — Overview</text>
+<text x="40" y="50" class="sub">One shared scoring brain · two runtimes (local $0 / AWS ephemeral)</text>
+
+<rect x="265" y="68" width="150" height="44" rx="10" fill="#F1EFE8" stroke="#C2C0B6"/>
+<text x="340" y="90" text-anchor="middle" class="t">Pump simulator</text>
+<text x="340" y="105" text-anchor="middle" class="ts">15 virtual pumps</text>
+
+<path class="arr" d="M340 112 L140 126" marker-end="url(#arrow)"/>
+<path class="arr" d="M340 112 L540 126" marker-end="url(#arrow)"/>
+
+<rect x="44" y="124" width="192" height="240" rx="14" fill="#F2FBF7" stroke="#BFE9DA"/>
+<text x="140" y="143" text-anchor="middle" class="t" fill="#0F6E56">Local mode · $0</text>
+<rect x="50" y="150" width="180" height="40" rx="9" fill="#E1F5EE" stroke="#5DCAA5"/>
+<text x="140" y="167" text-anchor="middle" class="t">Mosquitto MQTT</text>
+<text x="140" y="181" text-anchor="middle" class="ts">broker :1883</text>
+<rect x="50" y="204" width="180" height="40" rx="9" fill="#E1F5EE" stroke="#5DCAA5"/>
+<text x="140" y="221" text-anchor="middle" class="t">ScorerService</text>
+<text x="140" y="235" text-anchor="middle" class="ts">scores in-process</text>
+<rect x="50" y="258" width="180" height="40" rx="9" fill="#E1F5EE" stroke="#5DCAA5"/>
+<text x="140" y="275" text-anchor="middle" class="t">InfluxDB</text>
+<text x="140" y="289" text-anchor="middle" class="ts">time-series store</text>
+<rect x="50" y="312" width="180" height="40" rx="9" fill="#E1F5EE" stroke="#5DCAA5"/>
+<text x="140" y="329" text-anchor="middle" class="t">Grafana</text>
+<text x="140" y="343" text-anchor="middle" class="ts">dashboards</text>
+<path class="arr" d="M140 190 L140 204" marker-end="url(#arrow)"/>
+<path class="arr" d="M140 244 L140 258" marker-end="url(#arrow)"/>
+<path class="arr" d="M140 298 L140 312" marker-end="url(#arrow)"/>
+
+<rect x="444" y="124" width="192" height="240" rx="14" fill="#F1F7FD" stroke="#C5DEF5"/>
+<text x="540" y="143" text-anchor="middle" class="t" fill="#185FA5">AWS mode · ephemeral</text>
+<rect x="450" y="150" width="180" height="40" rx="9" fill="#E6F1FB" stroke="#85B7EB"/>
+<text x="540" y="167" text-anchor="middle" class="t">IoT Core</text>
+<text x="540" y="181" text-anchor="middle" class="ts">MQTT + rule</text>
+<rect x="450" y="204" width="180" height="40" rx="9" fill="#E6F1FB" stroke="#85B7EB"/>
+<text x="540" y="221" text-anchor="middle" class="t">lambda_scorer</text>
+<text x="540" y="235" text-anchor="middle" class="ts">scores per message</text>
+<rect x="450" y="258" width="180" height="40" rx="9" fill="#E6F1FB" stroke="#85B7EB"/>
+<text x="540" y="275" text-anchor="middle" class="t">DynamoDB + S3</text>
+<text x="540" y="289" text-anchor="middle" class="ts">hot state · archive</text>
+<rect x="450" y="312" width="180" height="40" rx="9" fill="#E6F1FB" stroke="#85B7EB"/>
+<text x="540" y="329" text-anchor="middle" class="t">Grafana</text>
+<text x="540" y="343" text-anchor="middle" class="ts">via adapter</text>
+<path class="arr" d="M540 190 L540 204" marker-end="url(#arrow)"/>
+<path class="arr" d="M540 244 L540 258" marker-end="url(#arrow)"/>
+<path class="arr" d="M540 298 L540 312" marker-end="url(#arrow)"/>
+
+<rect x="252" y="170" width="176" height="142" rx="14" fill="#EEEDFE" stroke="#7F77DD" stroke-width="1.2"/>
+<text x="340" y="192" text-anchor="middle" class="t" fill="#3C3489">Shared core</text>
+<text x="340" y="207" text-anchor="middle" class="ts" fill="#6E66C0">parity contract · ADR 0005</text>
+<rect x="264" y="216" width="152" height="26" rx="7" fill="#FFFFFF" stroke="#C9C2F2"/>
+<text x="340" y="233" text-anchor="middle" class="ts" fill="#3C3489">extract_features</text>
+<rect x="264" y="248" width="152" height="26" rx="7" fill="#FFFFFF" stroke="#C9C2F2"/>
+<text x="340" y="265" text-anchor="middle" class="ts" fill="#3C3489">score → P(fail 48h)</text>
+<rect x="264" y="280" width="152" height="26" rx="7" fill="#FFFFFF" stroke="#C9C2F2"/>
+<text x="340" y="297" text-anchor="middle" class="ts" fill="#3C3489">compute_psi → drift</text>
+<path class="dash" d="M230 224 L252 240" marker-end="url(#arrow)"/>
+<path class="dash" d="M450 224 L428 240" marker-end="url(#arrow)"/>
+
+<rect x="48" y="380" width="11" height="11" rx="2" fill="#EEEDFE" stroke="#7F77DD"/>
+<text x="65" y="389" class="ts">Shared logic</text>
+<rect x="150" y="380" width="11" height="11" rx="2" fill="#E1F5EE" stroke="#5DCAA5"/>
+<text x="167" y="389" class="ts">Local mode</text>
+<rect x="250" y="380" width="11" height="11" rx="2" fill="#E6F1FB" stroke="#85B7EB"/>
+<text x="267" y="389" class="ts">AWS mode</text>
+<path class="dash" d="M346 386 L366 386"/>
+<text x="372" y="389" class="ts">calls shared core</text>
+</svg>

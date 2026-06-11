@@ -1,0 +1,63 @@
+<svg width="100%" viewBox="0 0 680 416" role="img" xmlns="http://www.w3.org/2000/svg">
+<title>ML Observability Pipeline — Data Flow (AWS mode)</title>
+<desc>Telemetry flows from the simulator through IoT Core to lambda_scorer, which writes hot state to DynamoDB and emits edge-triggered SNS alerts. DynamoDB feeds the cold path (S3 batcher), the fleet drift path (fleet PSI), and visualization (Grafana adapter).</desc>
+<style>
+text{font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif}
+.tt{font-size:16px;font-weight:700;fill:#2C2C2A}
+.sub{font-size:12px;font-weight:400;fill:#6B6A64}
+.t{font-size:12.5px;font-weight:600;fill:#2C2C2A}
+.ts{font-size:11px;font-weight:400;fill:#5F5E5A}
+.hot{stroke:#E8593C;stroke-width:1.7;fill:none}
+.cold{stroke:#378ADD;stroke-width:1.7;fill:none}
+.fleet{stroke:#E0A12A;stroke-width:1.7;fill:none}
+.viz{stroke:#1D9E75;stroke-width:1.7;fill:none}
+</style>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<rect x="0" y="0" width="680" height="416" fill="#FCFBF8"/>
+<text x="40" y="32" class="tt">ML Observability Pipeline — Data Flow</text>
+<text x="40" y="50" class="sub">AWS mode · hot, cold, fleet-drift and visualization paths</text>
+
+<rect x="40" y="78" width="200" height="44" rx="9" fill="#F1EFE8" stroke="#C2C0B6"/>
+<text x="140" y="99" text-anchor="middle" class="t">Pump simulator</text>
+<text x="140" y="114" text-anchor="middle" class="ts">15 pumps · MQTT</text>
+<rect x="40" y="150" width="200" height="44" rx="9" fill="#F1EFE8" stroke="#C2C0B6"/>
+<text x="140" y="171" text-anchor="middle" class="t">IoT Core</text>
+<text x="140" y="186" text-anchor="middle" class="ts">Rule A → scorer</text>
+<rect x="40" y="222" width="200" height="50" rx="9" fill="#FAECE7" stroke="#F0997B"/>
+<text x="140" y="244" text-anchor="middle" class="t">lambda_scorer</text>
+<text x="140" y="259" text-anchor="middle" class="ts">features → score → PSI</text>
+<rect x="40" y="300" width="200" height="58" rx="9" fill="#EEF1F4" stroke="#B6C0C8"/>
+<text x="140" y="324" text-anchor="middle" class="t">DynamoDB</text>
+<text x="140" y="340" text-anchor="middle" class="ts">STATE · readings · watermark</text>
+
+<path class="hot" d="M140 122 L140 150" marker-end="url(#arrow)"/>
+<path class="hot" d="M140 194 L140 222" marker-end="url(#arrow)"/>
+<path class="hot" d="M140 272 L140 300" marker-end="url(#arrow)"/>
+
+<rect x="410" y="74" width="230" height="52" rx="9" fill="#FAECE7" stroke="#F0997B"/>
+<text x="525" y="96" text-anchor="middle" class="t">SNS — pump alert</text>
+<text x="525" y="112" text-anchor="middle" class="ts">edge-triggered on breach</text>
+<rect x="410" y="150" width="230" height="52" rx="9" fill="#E6F1FB" stroke="#85B7EB"/>
+<text x="525" y="172" text-anchor="middle" class="t">lambda_s3_batcher → S3</text>
+<text x="525" y="188" text-anchor="middle" class="ts">Parquet archive · every 60s</text>
+<rect x="410" y="236" width="230" height="52" rx="9" fill="#FBF2DF" stroke="#ECC06A"/>
+<text x="525" y="258" text-anchor="middle" class="t">lambda_fleet_psi → SNS</text>
+<text x="525" y="274" text-anchor="middle" class="ts">pooled fleet drift · every 5 min</text>
+<rect x="410" y="312" width="230" height="52" rx="9" fill="#E1F5EE" stroke="#5DCAA5"/>
+<text x="525" y="334" text-anchor="middle" class="t">dashboards_adapter → Grafana</text>
+<text x="525" y="350" text-anchor="middle" class="ts">reads STATE rows</text>
+
+<path class="hot" d="M240 240 L410 100" marker-end="url(#arrow)"/>
+<path class="cold" d="M240 318 L410 176" marker-end="url(#arrow)"/>
+<path class="fleet" d="M240 332 L410 262" marker-end="url(#arrow)"/>
+<path class="viz" d="M240 344 L410 338" marker-end="url(#arrow)"/>
+
+<rect x="40" y="388" width="11" height="11" rx="2" fill="#E8593C"/>
+<text x="57" y="397" class="ts">Hot path · real-time</text>
+<rect x="190" y="388" width="11" height="11" rx="2" fill="#378ADD"/>
+<text x="207" y="397" class="ts">Cold path · archive</text>
+<rect x="340" y="388" width="11" height="11" rx="2" fill="#E0A12A"/>
+<text x="357" y="397" class="ts">Fleet drift</text>
+<rect x="450" y="388" width="11" height="11" rx="2" fill="#1D9E75"/>
+<text x="467" y="397" class="ts">Visualization</text>
+</svg>
