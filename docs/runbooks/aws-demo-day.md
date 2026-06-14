@@ -136,6 +136,32 @@ Items checkable only against a live stack (`context/dashboards.md`
   log group vs warm invocations — the boto3-runtime-version latency
   measurement lives in `context/lambda_scorer.md` open items.
 
+
+### Fleet-PSI FLEET-path VERIFY (added 2026-06-11 part-2; ADR 0018/0012)
+
+Run with **`demo_mode: false`** (steady HEALTHY baseline — `demo_mode: true`
+auto-degrades pumps, [[demo-mode]]). Poll the adapter `fleet` object
+(`$r = Invoke-RestMethod <adapter_url>; $r.fleet | ConvertTo-Json`).
+
+- [ ] **Off-by-one, live:** `scenario: healthy` → `fleet.pumps_pooled == 15`
+  (was 14 pre-fix `77e2c61`). `pumps_reporting == 15`.
+- [ ] **Healthy quiet:** `psi_* < 0.05`, `alert_flag: false`,
+  `last_alert_sent_at: null`.
+- [ ] **Breach + edge-trigger (ADR 0012):** switch to `scenario: seasonal_drift`,
+  run ~10-15 min. A `psi_*` crosses 0.25 → `alert_flag: true` and
+  `last_alert_sent_at` populates to T1. On the NEXT 5-min tick `alert_flag`
+  stays true but `last_alert_sent_at` **holds at T1** → fired once, no
+  re-publish.
+- [ ] **Verify the fleet edge via the FLEET STATE row's `last_alert_sent_at`,
+  NOT logs or the SNS metric.** The handler's `log.info` lines (incl.
+  `fleet alert published`) are SUPPRESSED in CloudWatch (logger inherits the
+  Lambda root WARNING level — only per-pump WARNINGs surface; F1, fix =
+  `log.setLevel(INFO)` / TF `application_log_level`). `NumberOfMessagesPublished`
+  on the topic is shared with the per-pump scorer (ADR 0018), so under all-pump
+  drift it counts scorer alerts too and can't isolate the fleet publish (F3).
+- [ ] Expect a per-pump `LastEvaluatedKey` WARNING under `demo_mode: false`
+  (>150 rows/5 min) — benign; `ScanIndexForward=False` keeps the newest 150 (F2).
+
 ## 4. Teardown (mandatory)
 
 The `.sh` scripts run through Git Bash, whose PATH does NOT include

@@ -39,3 +39,11 @@ Plant-wide drift detector. EventBridge wakes it every 5 minutes; it pools the tr
 - ADR 0007 §4 — `load_reference` skips the version check without `model.pkl` → the drift-only layer.
 - ADR 0004 — `seasonal_drift`, the motivating fleet-wide case.
 - ADR 0005 — parity boundary; the three structural-parity guards.
+
+
+## Live-verify findings (2026-06-11 part-2 — `docs/sessions/2026-06-11-fleet-psi-live-verify-part2.md`)
+
+FLEET path proven live: `fleet.pumps_pooled == 15` (off-by-one fixed live), ADR 0012 edge-SNS fired once on the `seasonal_drift` breach and held (no re-publish), healthy fleet quiet. Two observability findings, no behaviour bug:
+
+- **F1 — INFO logs suppressed in CloudWatch.** `log = logging.getLogger(__name__)` with no `setLevel`, and no terraform `logging_config { application_log_level }`, so the module logger inherits the Lambda root level (WARNING). The per-run `fleet-psi ts=… alert=…` summary and the `fleet alert published` edge confirmation never reach the log group — only the per-pump WARNINGs surface. Verify the fleet edge via the FLEET STATE row's `last_alert_sent_at` (fleet-scoped, written only on the edge), NOT logs and NOT the shared topic's `NumberOfMessagesPublished` (which the per-pump scorer also drives — ADR 0018). Fix candidate: `log.setLevel(logging.INFO)` or TF `application_log_level = "INFO"`.
+- **F2 — 5-min window paginates under `demo_mode: false`.** At the real-time tick rate each pump exceeds 150 rows / 1 MB per window, so `_read_pump_window`'s single page logs `LastEvaluatedKey`. Benign — `ScanIndexForward=False` keeps the newest 150 (the freshest, most-drifted samples), which favours breach detection.
