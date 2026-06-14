@@ -26,7 +26,7 @@ First `docker ps` / `docker compose` 500'd on every API call (`...dockerDesktopL
 Two **latent render bugs** the contract-only closures had missed surfaced once observed live:
 
 - **Panel 1 "Pumps reporting" → `null`/`null`** (should be 15/15). The lone `root_selector: ""` panel: Infinity's default parser **auto-descends an empty root into the first child array** (`pumps[]`), so the top-level scalars `pumps_reporting`/`fleet_size` resolved against pump objects → null. A JSONata object-construction root (`{...}`) is **unsupported** by the default parser (rendered blank). **Fix: `root_selector: "$"`** — the bare root path resolves to the root object as a single row (same single-object mechanism `$.fleet` uses) → 15/15. *(One live iteration: tried JSONata first, it blanked, then `$`.)*
-- **`last_alert_sent_at` null → literal `"null"`, not `"never"`** (the "bonus" the brief marked contract-closed 2026-06-07 — never actually exercised live, because the 2026-06-07 PSI warmup storm set the timestamp on every pump). The `special: match "null"` mapping does **not** fire because Infinity serialises the wire `null` as the literal STRING `"null"` in a `type:string` column. **Fix: add a `type:"value"` mapping (`"null" → "never"`)** beside the special mapping on every `last_alert_sent_at` column. Applied to **panels 8 + 13** (had the special mapping) and **panel 2** (the "Fleet snapshot" table — had no mapping at all, was showing `"null"`; added for cross-table consistency). Re-observed: all three tables show "never" on null rows, real timestamps otherwise.
+- **`last_alert_sent_at` null → literal `"null"`, not `"never"`** (the "bonus" the brief marked contract-closed 2026-06-07 — never actually exercised live, because the 2026-06-07 PSI warmup storm set the timestamp on every pump). The `special: match "null"` mapping does **not** fire because Infinity serialises the wire `null` as the literal STRING `"null"` in a `type:string` column. **Fix: add a `type:"value"` mapping (`"null" → "never"`)** on every `last_alert_sent_at` column (the dead `special: match null` mapping was then REMOVED in the review fold — see Review dispositions). Applied to **panels 8 + 13** (had the special mapping) and **panel 2** (the "Fleet snapshot" table — had no mapping at all, was showing `"null"`; added for cross-table consistency). Re-observed: all three tables show "never" on null rows, real timestamps otherwise.
 
 ## Changes
 - `dashboards/aws.json` — panel 1 `root_selector "" → "$"`; `null→never` value mapping added to `last_alert_sent_at` overrides on panels 2, 8, 13. **No field-vocabulary change** (column selectors untouched).
@@ -50,3 +50,17 @@ F1 INFO-log suppression · reserved concurrency `-1` (Service Quotas bump) · SS
 ## Lessons
 - **Contract reasoning ≠ live render behaviour.** Two items "closed by contract" were wrong/incomplete when finally observed: the special-null mapping is a trap for **stringified** JSON nulls, and an **empty Infinity `root_selector` auto-descends** into a child array. A $0 local mock that reproduces the exact wire shape (incl. nulls + top-level scalars) catches these without an apply.
 - Diagnose the **Docker engine** (`docker version` Server section) before blaming compose/config — the 500-on-every-call signature is a wedged Desktop engine.
+
+## Review dispositions (DeepSeek `deepseek-reasoner`, 2026-06-14)
+
+Packet `review_packets/2026-06-14-grafana-infinity-close.md` → response `review_responses/2026-06-14-grafana-infinity-close.md`. Strong pass — core fixes accepted (`"$"` root selector, panel-2 inclusion, mock-vs-live equivalence).
+
+- **Q1 `root_selector:"$"`** — accepted, idiomatic, no auto-descend regression. Recommends pinning the Infinity plugin version (`docker-compose.yml` `GF_INSTALL_PLUGINS: yesoreyeram-infinity-datasource` is unpinned). **Tracked follow-up** — needs the live-installed version (`docker compose exec grafana grafana cli plugins ls`); not folded this pass.
+- **Q2 null→never** — **FOLDED:** the `special: match null` mapping is dead on a `type:string` column (never fires); removed from panels 2/8/13, the `type:"value"` mapping alone retained. `aws.json` re-diffed, vocab tests 7/7 green.
+- **Q3 panel-2 scope** — accepted (correct, not creep).
+- **Q4 guard rule** — **FOLDED:** explicit string-null rule added to `context/dashboards.md §Open questions` ("a `type:string` column renders a wire `null` as the string `"null"`; `special: match null` does NOT fire — use a `type:"value"` map, never `special`") + memory [[ml-obs-pipeline-infinity-render-gotchas]].
+- **Q5 mock-vs-live** — safe to close on; documented that closure used a live-shaped mock (no implicit e2e-live promise).
+- **Q6 empty `fleet:{}`** — left untested (mock served a populated fleet); verified-by-contract, not re-tested 2026-06-14 (low-risk demo-day gate).
+- Extra notes: `"$"` assumes an object root (true per the ADR 0014 envelope); value-mapping ordering moot post-removal; panel-1 stat two-column layout fine.
+
+**Net follow-on change:** `dashboards/aws.json` — removed 3 dead `special` mappings (value mapping only). One optional re-observe (render-neutral; the value mapping at index 0 is the path that was already confirmed firing).

@@ -140,13 +140,6 @@
                     "options": {
                       "null": { "index": 0, "text": "never" }
                     }
-                  },
-                  {
-                    "type": "special",
-                    "options": {
-                      "match": "null",
-                      "result": { "index": 1, "text": "never" }
-                    }
                   }
                 ]
               }
@@ -435,13 +428,6 @@
                     "options": {
                       "null": { "index": 0, "text": "never" }
                     }
-                  },
-                  {
-                    "type": "special",
-                    "options": {
-                      "match": "null",
-                      "result": { "index": 1, "text": "never" }
-                    }
                   }
                 ]
               }
@@ -687,13 +673,6 @@
                     "type": "value",
                     "options": {
                       "null": { "index": 0, "text": "never" }
-                    }
-                  },
-                  {
-                    "type": "special",
-                    "options": {
-                      "match": "null",
-                      "result": { "index": 1, "text": "never" }
                     }
                   }
                 ]
