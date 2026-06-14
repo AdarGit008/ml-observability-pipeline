@@ -25,7 +25,7 @@
           "format": "table",
           "url": "",
           "url_options": { "method": "GET", "data": "" },
-          "root_selector": "",
+          "root_selector": "$",
           "columns": [
             { "selector": "pumps_reporting", "text": "pumps_reporting", "type": "number" },
             { "selector": "fleet_size", "text": "fleet_size", "type": "number" }
@@ -126,6 +126,29 @@
                     { "color": "red", "value": 0.25 }
                   ]
                 }
+              }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "last_alert_sent_at" },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "null": { "index": 0, "text": "never" }
+                    }
+                  },
+                  {
+                    "type": "special",
+                    "options": {
+                      "match": "null",
+                      "result": { "index": 1, "text": "never" }
+                    }
+                  }
+                ]
               }
             ]
           }
@@ -408,10 +431,16 @@
                 "id": "mappings",
                 "value": [
                   {
+                    "type": "value",
+                    "options": {
+                      "null": { "index": 0, "text": "never" }
+                    }
+                  },
+                  {
                     "type": "special",
                     "options": {
                       "match": "null",
-                      "result": { "index": 0, "text": "never" }
+                      "result": { "index": 1, "text": "never" }
                     }
                   }
                 ]
@@ -655,10 +684,16 @@
                 "id": "mappings",
                 "value": [
                   {
+                    "type": "value",
+                    "options": {
+                      "null": { "index": 0, "text": "never" }
+                    }
+                  },
+                  {
                     "type": "special",
                     "options": {
                       "match": "null",
-                      "result": { "index": 0, "text": "never" }
+                      "result": { "index": 1, "text": "never" }
                     }
                   }
                 ]
