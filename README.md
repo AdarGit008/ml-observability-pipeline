@@ -103,6 +103,16 @@ path, fleet-wide drift, and visualization:
 
 ---
 
+## Design principles
+
+- **One scoring brain.** Local and AWS modes import the same `shared/` code; a structural test fails the build if either side forks it ([ADR&nbsp;0005](docs/adr/0005-shared-mode-parity-package-and-subscriber-topology.md)).
+- **$0 by construction.** Local mode is pure Docker; AWS mode is apply &rarr; demo &rarr; destroy on credits, torn down after every run &mdash; no standing cloud cost.
+- **Verification is non-negotiable.** 454 tests run on every push, and every change ships with evidence and a recorded review ([ADR&nbsp;0011](docs/adr/0011-multi-provider-review-cascade.md)).
+- **The *why* is written down.** 18 ADRs document the reasoning behind each non-obvious choice &mdash; not just the outcome.
+- **AWS-specific on purpose.** Service choices favor AWS-differentiated primitives (IoT Core, DynamoDB, Glue) over generic cloud analogues.
+
+---
+
 ## AWS mode (ephemeral demos)
 
 AWS mode is **apply → demo → destroy**, never left standing. The full sequence — pre-flight, build,
@@ -139,18 +149,40 @@ DynamoDB on-demand per [ADR&nbsp;0013](docs/adr/0013-dynamodb-on-demand-billing.
 
 ## Repository map
 
+**Telemetry source**
+
 | Path | What lives here |
 |------|-----------------|
 | [`simulator/`](simulator) | Async pump-fleet simulator — telemetry over MQTT, three drift scenarios. |
+
+**Shared scoring core**
+
+| Path | What lives here |
+|------|-----------------|
 | [`shared/`](shared) | **The parity core**: `features`, `score`, `drift` — shared by both runtimes ([ADR&nbsp;0005](docs/adr/0005-shared-mode-parity-package-and-subscriber-topology.md)). |
 | [`model/`](model) | Training pipeline + committed model artifacts (held-out AUC ≈ 0.997). |
+
+**Local mode ($0)**
+
+| Path | What lives here |
+|------|-----------------|
 | [`local_runtime/`](local_runtime) | Local-mode consumer: subscribe → score → InfluxDB. |
-| [`lambda_scorer/`](lambda_scorer) | AWS hot path: score per message → DynamoDB, edge-triggered SNS alert. |
-| [`lambda_s3_batcher/`](lambda_s3_batcher) | AWS cold path: DynamoDB → Parquet → S3 (Glue table). |
+| [`dashboards/`](dashboards), [`grafana/`](grafana) | Grafana dashboards + provisioning-as-code (serves local + AWS). |
+
+**AWS mode (ephemeral)**
+
+| Path | What lives here |
+|------|-----------------|
+| [`lambda_scorer/`](lambda_scorer) | Hot path: score per message → DynamoDB, edge-triggered SNS alert. |
+| [`lambda_s3_batcher/`](lambda_s3_batcher) | Cold path: DynamoDB → Parquet → S3 (Glue table). |
 | [`lambda_fleet_psi/`](lambda_fleet_psi) | Pooled, plant-wide drift Lambda on an EventBridge schedule. |
-| [`dashboards_adapter/`](dashboards_adapter) | AWS Function URL that feeds Grafana via the Infinity datasource. |
-| [`dashboards/`](dashboards), [`grafana/`](grafana) | Grafana dashboards + provisioning-as-code. |
+| [`dashboards_adapter/`](dashboards_adapter) | Function URL that feeds Grafana via the Infinity datasource. |
 | [`infra/`](infra) | Terraform for the entire AWS deployment. |
+
+**Docs & tooling**
+
+| Path | What lives here |
+|------|-----------------|
 | [`docs/`](docs) | [ADRs](docs/adr), [diagrams](docs/diagrams), [runbooks](docs/runbooks), session logs. |
 | [`scripts/`](scripts) | Lambda build scripts + the code-review tooling. |
 
@@ -172,14 +204,45 @@ command runs in [CI](.github/workflows/ci.yml) on every push.
 
 ## Design decisions
 
-Eighteen [Architecture Decision Records](docs/adr) capture the *why* behind every non-obvious choice — a
-few worth skimming:
+The repo's defining feature: every non-obvious choice is written down. **18 [Architecture Decision Records](docs/adr)** capture the *why*, grouped by area.
 
-- [ADR 0005](docs/adr/0005-shared-mode-parity-package-and-subscriber-topology.md) — the shared mode-parity contract
-- [ADR 0007](docs/adr/0007-psi-implementation-and-cadence.md) — PSI implementation & cadence
-- [ADR 0010](docs/adr/0010-dynamodb-schema-hot-state.md) — DynamoDB hot-state schema
-- [ADR 0012](docs/adr/0012-edge-triggered-sns-alerts.md) — edge-triggered SNS alerts
-- [ADR 0016](docs/adr/0016-iot-fleet-provisioning-cert-custody.md) — IoT fleet provisioning & cert custody
+**Simulator & telemetry**
+
+| ADR | Decision |
+|-----|----------|
+| [0002](docs/adr/0002-rpm-coupled-to-degradation.md) | Couple RPM to degradation so failure signatures are learnable |
+| [0003](docs/adr/0003-asyncio-mqtt-per-pump-aiomqtt.md) | Asyncio + aiomqtt, one connection per pump, retry-forever |
+| [0004](docs/adr/0004-tick-driven-scenario-controller.md) | Tick-driven, fleet-level scenario controller |
+
+**Model, drift & mode parity**
+
+| ADR | Decision |
+|-----|----------|
+| [0005](docs/adr/0005-shared-mode-parity-package-and-subscriber-topology.md) | The shared `features`/`score`/`drift` parity package + subscriber topology |
+| [0006](docs/adr/0006-model-family-and-feature-engineering.md) | HistGradientBoostingClassifier + training-time degrading-dwell stretch |
+| [0007](docs/adr/0007-psi-implementation-and-cadence.md) | Real PSI with Laplace smoothing + explicit reference-load semantics |
+| [0008](docs/adr/0008-operational-reference-source-separation.md) | PSI baseline from demo-paced healthy data, not the training matrix |
+| [0009](docs/adr/0009-psi-surface-vs-scorer-feature-set.md) | Drift watches 4 raw signals; the scorer uses 8 features |
+| [0017](docs/adr/0017-psi-warmup-gate.md) | Warm-up gate arms drift alerts only after enough samples |
+
+**AWS pipeline & infrastructure**
+
+| ADR | Decision |
+|-----|----------|
+| [0010](docs/adr/0010-dynamodb-schema-hot-state.md) | DynamoDB schema for hot state |
+| [0012](docs/adr/0012-edge-triggered-sns-alerts.md) | Edge-triggered SNS alerts + two-attribute alert state |
+| [0013](docs/adr/0013-dynamodb-on-demand-billing.md) | DynamoDB on-demand billing keeps idle cost at $0 |
+| [0014](docs/adr/0014-grafana-adapter-api-contract.md) | Grafana adapter contract: Function URL + Infinity datasource |
+| [0015](docs/adr/0015-cold-path-batcher-watermark-pyarrow-cadence.md) | Cold-path batcher: watermark reads, pyarrow Parquet, 60 s cadence |
+| [0016](docs/adr/0016-iot-fleet-provisioning-cert-custody.md) | IoT fleet provisioning: Terraform certs + shared thing-variable policy |
+| [0018](docs/adr/0018-fleet-psi-eventbridge-lambda.md) | Fleet-PSI EventBridge Lambda: pooled plant-wide drift |
+
+**Process & tooling**
+
+| ADR | Decision |
+|-----|----------|
+| [0001](docs/adr/0001-direct-gemini-api-for-reviews.md) | Call the review API directly, bypassing the CLI |
+| [0011](docs/adr/0011-multi-provider-review-cascade.md) | Multi-provider review cascade with per-response audit provenance |
 
 ---
 
