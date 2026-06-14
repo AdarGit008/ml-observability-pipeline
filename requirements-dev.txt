@@ -1,0 +1,13 @@
+# Development & CI dependencies — NOT required at runtime.
+#
+# Install on top of the runtime deps:
+#   pip install -r requirements.txt -r requirements-dev.txt
+#
+# requirements.txt's header anticipated this file ("Dev-only deps ... will land
+# in requirements-dev.txt once we add CI"). The suite is pure unit tests — AWS is
+# faked in-process, so no Docker / AWS account / network is needed to run them.
+
+pytest>=8.0                  # test runner (see `python -m pytest`)
+moto[dynamodb,s3,sns]>=5.0   # in-memory AWS mocks for the Lambda handler tests
+                             # (lambda_scorer, lambda_s3_batcher, lambda_fleet_psi,
+                             #  dashboards_adapter) — covers DynamoDB, S3, SNS.
